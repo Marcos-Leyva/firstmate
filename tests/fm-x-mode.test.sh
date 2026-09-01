@@ -429,7 +429,7 @@ test_poll_preserves_conversation_context() {
 # inbound media URL has to survive the poll, and the poll itself must leave the
 # fetching to the agent rather than pulling third-party bytes on the poll path.
 test_poll_preserves_inbound_attachment_urls() {
-  local home fakebin log out rc body f img1 img2 doc
+  local home fakebin log out rc body f img1 img2 doc urls
   home="$TMP_ROOT/poll-inbound-urls"; mkdir -p "$home"
   fakebin=$(make_fake_curl "$home")
   log="$home/curl.log"
@@ -479,8 +479,9 @@ test_poll_preserves_inbound_attachment_urls() {
     || fail "a non-image chain attachment must survive the poll"
   [ "$(jq -r '.in_reply_to_chain[0].attachments[0].filename' "$f")" = "trace.log" ] \
     || fail "a chain attachment must keep its filename"
-  grep -q 'IMG_2718\.png' "$log" 2>/dev/null \
-    && fail "the poll must leave inbound media fetching to the responding agent"
+  urls=$(grep '^url=' "$log" 2>/dev/null || true)
+  [ "$urls" = "url=https://relay.test/connector/poll" ] \
+    || fail "the poll must be the only fetched URL (got: $urls)"
   pass "fm-x-poll preserves inbound attachment URLs for the responder"
 }
 
