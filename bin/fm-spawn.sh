@@ -2596,8 +2596,8 @@ crew_bedrock_settings_fragment() {
     echo "warning: $file: not valid JSON or not an object; falling back to hooks-only settings" >&2
     return 0
   fi
-  env_obj=$(printf '%s' "$raw" | jq -c '.env // empty' 2>/dev/null) || env_obj=""
-  overrides_obj=$(printf '%s' "$raw" | jq -c '.modelOverrides // empty' 2>/dev/null) || overrides_obj=""
+  env_obj=$(printf '%s' "$raw" | jq -c '.env | select(type == "object")' 2>/dev/null) || env_obj=""
+  overrides_obj=$(printf '%s' "$raw" | jq -c '.modelOverrides | select(type == "object")' 2>/dev/null) || overrides_obj=""
   if [ -z "$env_obj" ] || [ -z "$overrides_obj" ]; then
     echo "warning: $file: missing required env or modelOverrides object; falling back to hooks-only settings" >&2
     return 0
