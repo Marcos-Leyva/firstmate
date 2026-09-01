@@ -171,6 +171,19 @@
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# A claude crewmate or scout additionally carries its OWN AWS Bedrock provider
+# configuration in the same per-task <worktree>/.claude/settings.local.json,
+# so a worker bills against Bedrock while the firstmate PRIMARY keeps its direct
+# Anthropic billing. The account-specific values (env keys, model overrides) are
+# read from the local, gitignored config/crew-bedrock-values JSON file, while the
+# local config/crew-bedrock file is the on/off kill switch. Both files are absent
+# in a fresh clone; the values file is populated per account and the kill switch
+# defaults to on. When the values file is absent, only hooks are written (the
+# hooks-only default). This is scoped entirely to the disposable task worktree;
+# no global or primary-checkout settings file is ever touched.
+# A claude SECONDMATE is a firstmate instance rather than a worker and gets no
+# such file, exactly as before; its own crewmates inherit this default through
+# config/crew-bedrock and config/crew-bedrock-values (bin/fm-config-inherit-lib.sh).
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -2541,6 +2554,56 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+
+# config/crew-bedrock is the local, gitignored kill switch for the per-worker
+# Bedrock provider. Default ON, so every claude worker bills against Bedrock and
+# never draws down the direct-Anthropic subscription the firstmate PRIMARY runs
+# on; the primary is structurally unaffected because it is never launched through
+# this script and the keys are written only inside the spawned worker's own
+# disposable worktree. Parsed with the whole-file whitespace-stripped,
+# case-folded convention the other scalar config items already use
+# (config/crew-harness, config/herdr-presentation-spaces): an absent or empty
+# file keeps the default. An unrecognized value warns and keeps the default
+# rather than failing a spawn over a billing preference, so a typo is visible
+# instead of silently deciding.
+crew_bedrock_enabled() {
+  local file value
+  file="$CONFIG/crew-bedrock"
+  [ -f "$file" ] || return 0
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  case "$value" in
+    off) return 1 ;;
+    ''|on) return 0 ;;
+    *)
+      echo "warning: $file: unrecognized value \"$value\"; the crewmate Bedrock provider stays on (write \"off\" to opt out)" >&2
+      return 0
+      ;;
+  esac
+}
+
+# config/crew-bedrock-values is the local, gitignored JSON file carrying the
+# account-specific env and modelOverrides objects a claude worker needs. Read it
+# and emit a JSON fragment suitable for splicing as leading keys in the settings
+# object (trailing comma included). Prints nothing on stdout when absent (the
+# hooks-only default), and warns on stderr + prints nothing when malformed,
+# so a bad file never fails a spawn or injects broken JSON.
+crew_bedrock_settings_fragment() {
+  local file raw env_obj overrides_obj
+  file="$CONFIG/crew-bedrock-values"
+  [ -f "$file" ] || return 0
+  raw=$(cat "$file" 2>/dev/null) || { echo "warning: $file: unreadable; falling back to hooks-only settings" >&2; return 0; }
+  if ! printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "warning: $file: not valid JSON or not an object; falling back to hooks-only settings" >&2
+    return 0
+  fi
+  env_obj=$(printf '%s' "$raw" | jq -c '.env // empty' 2>/dev/null) || env_obj=""
+  overrides_obj=$(printf '%s' "$raw" | jq -c '.modelOverrides // empty' 2>/dev/null) || overrides_obj=""
+  if [ -z "$env_obj" ] || [ -z "$overrides_obj" ]; then
+    echo "warning: $file: missing required env or modelOverrides object; falling back to hooks-only settings" >&2
+    return 0
+  fi
+  printf '"env":%s,"modelOverrides":%s,' "$env_obj" "$overrides_obj"
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -2610,8 +2673,14 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      # The same per-task settings file also carries this worker's own provider
+      # configuration when config/crew-bedrock has not switched it off AND
+      # config/crew-bedrock-values supplies the account-specific keys, so the
+      # worker bills against Bedrock without any global settings file deciding it.
+      BEDROCK_KEYS=
+      if crew_bedrock_enabled; then BEDROCK_KEYS=$(crew_bedrock_settings_fragment); fi
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{$BEDROCK_KEYS"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
