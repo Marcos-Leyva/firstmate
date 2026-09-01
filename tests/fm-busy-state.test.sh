@@ -355,6 +355,24 @@ test_cursor_ignores_rendered_and_native_signals() {
   pass "cursor classifies only from its transcript fold, never rendered text or native state"
 }
 
+test_kiro_hook_source_trusted() {
+  local state gen out
+  state=$(new_state_dir kiro-trust)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source kiro-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 kiro t1 "$state")
+  [ "$out" = "busy kiro-hook" ] || fail "kiro-hook must be trusted for kiro, got '$out'"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source kiro-hook --event stop
+  out=$(fm_busy_classify tmux w1 kiro t1 "$state")
+  [ "$out" = "idle kiro-hook" ] || fail "kiro-hook stop must settle to idle, got '$out'"
+  # claude-hook must NOT be trusted for kiro - source isolation
+  gen=$("$EV" arm "$state" t2)
+  "$EV" apply "$state" t2 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 kiro t2 "$state")
+  [ "$out" = "unknown source-mismatch" ] || fail "claude-hook must not be trusted for kiro, got '$out'"
+  pass "kiro trusts kiro-hook and rejects claude-hook (source isolation)"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
@@ -457,6 +475,7 @@ test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
+test_kiro_hook_source_trusted
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
