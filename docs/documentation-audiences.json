@@ -421,6 +421,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/crew-provider.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },

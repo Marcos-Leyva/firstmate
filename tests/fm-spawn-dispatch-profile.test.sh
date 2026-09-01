@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Behavior tests for fm-spawn.sh concrete dispatch profile flags.
+# Behavior tests for fm-spawn.sh concrete dispatch profile flags and the
+# provider configuration a spawn hands its worker.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
 # literal launch command sent with `tmux send-keys -l`, so assertions pin the
-# command firstmate would run without starting any real harness.
+# command firstmate would run without starting any real harness. Provider
+# assertions read the settings file the spawn actually wrote into that worktree.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -792,6 +794,178 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# The provider keys come from the local config/crew-bedrock-values file. Tests
+# use obviously fake placeholder values so no real account id leaks into tracked
+# content. The assert helpers read back through jq from the settings file the
+# spawn wrote.
+FAKE_BEDROCK_VALUES='{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-fake-1","ANTHROPIC_MODEL":"global.anthropic.claude-opus-4-6-v1","ANTHROPIC_DEFAULT_OPUS_MODEL":"global.anthropic.claude-opus-4-6-v1","ANTHROPIC_DEFAULT_SONNET_MODEL":"global.anthropic.claude-sonnet-4-6-v1","ANTHROPIC_DEFAULT_HAIKU_MODEL":"global.anthropic.claude-haiku-4-5-20251001-v1:0"},"modelOverrides":{"claude-opus-4-6":"arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-opus-4-6-v1","claude-sonnet-4-6":"arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-sonnet-4-6-v1","claude-opus-5":"arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-opus-5","claude-sonnet-5":"arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-sonnet-5"}}'
+
+BEDROCK_ENV_EXPECTED='CLAUDE_CODE_USE_BEDROCK=1
+AWS_REGION=us-fake-1
+ANTHROPIC_MODEL=global.anthropic.claude-opus-4-6-v1
+ANTHROPIC_DEFAULT_OPUS_MODEL=global.anthropic.claude-opus-4-6-v1
+ANTHROPIC_DEFAULT_SONNET_MODEL=global.anthropic.claude-sonnet-4-6-v1
+ANTHROPIC_DEFAULT_HAIKU_MODEL=global.anthropic.claude-haiku-4-5-20251001-v1:0'
+BEDROCK_OVERRIDES_EXPECTED='claude-opus-4-6=arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-opus-4-6-v1
+claude-sonnet-4-6=arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-sonnet-4-6-v1
+claude-opus-5=arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-opus-5
+claude-sonnet-5=arn:aws:bedrock:us-fake-1:000000000000:inference-profile/global.anthropic.claude-sonnet-5'
+
+install_fake_bedrock_values() {  # <home>
+  printf '%s\n' "$FAKE_BEDROCK_VALUES" > "$1/config/crew-bedrock-values"
+}
+
+assert_worker_hooks_intact() {  # <settings-file>
+  local settings=$1 ev
+  jq -e . "$settings" >/dev/null || fail "worker settings are not valid JSON: $settings"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"][0].hooks[0].command" "$settings" >/dev/null \
+      || fail "worker settings lost the $ev hook command"
+  done
+}
+
+assert_bedrock_keys_present() {  # <settings-file>
+  local settings=$1 line key want got
+  while IFS= read -r line; do
+    key=${line%%=*}
+    want=${line#*=}
+    got=$(jq -r --arg k "$key" '.env[$k] // "<absent>"' "$settings")
+    [ "$got" = "$want" ] \
+      || fail "worker settings env.$key should be '$want', got '$got'"
+  done <<< "$BEDROCK_ENV_EXPECTED"
+  while IFS= read -r line; do
+    key=${line%%=*}
+    want=${line#*=}
+    got=$(jq -r --arg k "$key" '.modelOverrides[$k] // "<absent>"' "$settings")
+    [ "$got" = "$want" ] \
+      || fail "worker settings modelOverrides.$key should be '$want', got '$got'"
+  done <<< "$BEDROCK_OVERRIDES_EXPECTED"
+  [ "$(jq -r '.env | length' "$settings")" = 6 ] \
+    || fail "worker settings env must carry exactly the six provider keys"
+  [ "$(jq -r '.modelOverrides | length' "$settings")" = 4 ] \
+    || fail "worker settings modelOverrides must carry exactly the four pinned models"
+}
+
+assert_hooks_only_settings() {  # <settings-file>
+  local settings=$1
+  jq -e . "$settings" >/dev/null || fail "worker settings are not valid JSON: $settings"
+  [ "$(jq -r 'has("env")' "$settings")" = false ] \
+    || fail "hooks-only settings must have no env keys"
+  [ "$(jq -r 'has("modelOverrides")' "$settings")" = false ] \
+    || fail "hooks-only settings must have no modelOverrides keys"
+  [ "$(jq -r 'keys | join(",")' "$settings")" = hooks ] \
+    || fail "hooks-only settings must have only the hooks key"
+  assert_worker_hooks_intact "$settings"
+}
+
+test_claude_worker_carries_bedrock_provider_with_values_file() {
+  local rec id out status settings
+  id=profile-claude-bedrock-default-z35
+  rec=$(make_spawn_case profile-claude-bedrock-default claude "$id")
+  read_case_record "$rec"
+  assert_absent "$HOME_DIR/config/crew-bedrock" "the default case must not set the kill switch"
+  install_fake_bedrock_values "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with values file should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write the worker settings file"
+  assert_bedrock_keys_present "$settings"
+  assert_worker_hooks_intact "$settings"
+  assert_absent "$PROJ_DIR/.claude" "a worker's provider settings must never land in the project checkout"
+  pass "a claude worker carries the Bedrock provider keys from config/crew-bedrock-values"
+}
+
+test_crew_bedrock_off_restores_hooks_only_worker_settings() {
+  local rec id out status settings
+  id=profile-claude-bedrock-off-z36
+  rec=$(make_spawn_case profile-claude-bedrock-off claude "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+  printf 'off\n' > "$HOME_DIR/config/crew-bedrock"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with the provider switched off should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write the worker settings file"
+  assert_hooks_only_settings "$settings"
+  pass "config/crew-bedrock=off restores hooks-only worker settings"
+}
+
+test_unrecognized_crew_bedrock_value_warns_and_keeps_the_default() {
+  local rec id out status settings
+  id=profile-claude-bedrock-typo-z37
+  rec=$(make_spawn_case profile-claude-bedrock-typo claude "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+  printf 'disabled\n' > "$HOME_DIR/config/crew-bedrock"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an unrecognized provider value must not fail the spawn: $out"
+  assert_contains "$out" 'unrecognized value "disabled"' \
+    "an unrecognized config/crew-bedrock value must warn by name"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_bedrock_keys_present "$settings"
+  pass "an unrecognized config/crew-bedrock value warns and keeps the provider default on"
+}
+
+test_absent_bedrock_values_file_produces_hooks_only_settings() {
+  local rec id out status settings
+  id=profile-claude-bedrock-absent-z38
+  rec=$(make_spawn_case profile-claude-bedrock-absent claude "$id")
+  read_case_record "$rec"
+  assert_absent "$HOME_DIR/config/crew-bedrock" "the absent case must not set the kill switch"
+  assert_absent "$HOME_DIR/config/crew-bedrock-values" "the absent case must not have a values file"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without a values file should succeed: $out"
+  assert_not_contains "$out" "crew-bedrock-values" "absent values file must not mention crew-bedrock-values"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write the worker settings file"
+  assert_hooks_only_settings "$settings"
+  pass "absent config/crew-bedrock-values produces hooks-only settings with no warning"
+}
+
+test_malformed_bedrock_values_file_warns_and_falls_back() {
+  local rec id out status settings
+  id=profile-claude-bedrock-malformed-z39
+  rec=$(make_spawn_case profile-claude-bedrock-malformed claude "$id")
+  read_case_record "$rec"
+  printf 'not json at all\n' > "$HOME_DIR/config/crew-bedrock-values"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with malformed values file must not fail: $out"
+  assert_contains "$out" "warning:" "malformed values file must warn"
+  assert_contains "$out" "hooks-only" "malformed warning must mention the fallback"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write the worker settings file"
+  assert_hooks_only_settings "$settings"
+  pass "malformed config/crew-bedrock-values warns and falls back to hooks-only settings"
+}
+
+test_bedrock_values_file_with_valid_json_lands_keys_in_worktree() {
+  local rec id out status settings
+  id=profile-claude-bedrock-valid-z40
+  rec=$(make_spawn_case profile-claude-bedrock-valid claude "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with valid values file should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write the worker settings file"
+  assert_bedrock_keys_present "$settings"
+  assert_worker_hooks_intact "$settings"
+  assert_absent "$PROJ_DIR/.claude" "provider settings must never land in the project checkout"
+  pass "valid config/crew-bedrock-values lands env and modelOverrides in the worker worktree"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -823,5 +997,11 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_claude_worker_carries_bedrock_provider_with_values_file
+test_crew_bedrock_off_restores_hooks_only_worker_settings
+test_unrecognized_crew_bedrock_value_warns_and_keeps_the_default
+test_absent_bedrock_values_file_produces_hooks_only_settings
+test_malformed_bedrock_values_file_warns_and_falls_back
+test_bedrock_values_file_with_valid_json_lands_keys_in_worktree
 
 echo "# all fm-spawn-dispatch-profile tests passed"

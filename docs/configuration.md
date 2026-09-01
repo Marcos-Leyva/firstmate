@@ -374,6 +374,28 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Crewmate Bedrock provider (config/crew-bedrock)
+
+Every claude crewmate and scout can carry its own AWS Bedrock provider configuration, so worker usage bills against Bedrock instead of drawing down the direct Anthropic subscription the firstmate primary runs on.
+
+The configuration is written only into the spawned worker's own disposable task worktree, as extra `env` and `modelOverrides` keys in the same per-task `<worktree>/.claude/settings.local.json` that already carries that worker's turn-end and busy-state hooks.
+No global settings file and no other home's checkout is read or written, so the firstmate primary - which is never launched through `bin/fm-spawn.sh` - keeps whatever billing its own environment selects.
+A claude secondmate is a firstmate instance rather than a worker and receives no such file; its own crewmates get the provider configuration through the inherited files below.
+
+Two local, gitignored config files control this feature:
+
+- `config/crew-bedrock` is the on/off kill switch.
+  Write `off` to restore hooks-only worker settings, or `on` to state the default explicitly; an absent or empty file keeps the default on.
+  Values are read with the whole-file whitespace-stripped, case-folded convention the other scalar config items use, and an unrecognized value warns and keeps the default rather than failing a spawn over a billing preference.
+- `config/crew-bedrock-values` is a JSON file carrying the account-specific `env` and `modelOverrides` objects.
+  When this file is absent, workers get hooks-only settings (no provider configuration), silently.
+  When malformed or missing a required key, the spawn warns on stderr and falls back to hooks-only settings.
+  [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the read and validation logic.
+
+The provider keys land in the worker's settings only when the kill switch is not `off` AND the values file is present and valid.
+The setting takes effect at the next crewmate or scout spawn; a worker already running keeps the settings file it was launched with.
+Secondmate homes inherit both files from the primary, so turning off the kill switch once or removing the values file turns off the Bedrock provider for every home's workers.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
