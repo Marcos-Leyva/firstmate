@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|kiro|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,6 +50,11 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # kiro does NOT clear inherited CLAUDECODE, same hazard as cursor. Test
+  # kiro-specific markers before CLAUDECODE so a kiro worker launched from a
+  # claude primary is not misidentified. KIRO_SESSION_ID is a UUID always
+  # present in kiro tool subprocesses (verified kiro-cli 2.18.0).
+  [ -n "${KIRO_SESSION_ID:-}" ] && { echo kiro; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -86,6 +91,7 @@ detect_own() {
       *codex*) echo codex; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
+      kiro-cli|kiro-cli-chat) echo kiro; return ;;
       kimi) echo kimi; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
@@ -103,6 +109,7 @@ detect_own() {
           *codex*) echo codex; return ;;
           *opencode*) echo opencode; return ;;
           *grok*) echo grok; return ;;
+          *kiro-cli*) echo kiro; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac

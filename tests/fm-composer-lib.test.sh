@@ -562,6 +562,36 @@ test_cursor_on_proven_box_bottom_classifies_content() {
   pass "fm_composer_classify_screen: a proven box tolerates a bottom-border cursor"
 }
 
+test_matrix_kiro_text_keyed_classification() {
+  # Kiro-cli 2.18.0 draws no box, no prompt glyph, no left-bar, and no
+  # separator pair - zero structural container proof. The text-keyed fallback
+  # proves empty from the idle placeholder, and returns unknown (never pending)
+  # for the mid-turn busy indicator and for arbitrary typed text, because
+  # typed text without container proof is indistinguishable from any other
+  # terminal content.
+  local idle busy typed out
+  # Idle pane: only the placeholder text, no structural container.
+  idle=$'some transcript output\nask a question or describe a task'
+  assert_screen "kiro idle on tmux" empty "$CAPS_TMUX" "$idle" 1
+  assert_screen "kiro idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "kiro idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "kiro idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  # Mid-turn busy indicator: not user text, not idle.
+  busy=$'some transcript output\nKiro is working · Type to steer · Ctrl+S to queue'
+  assert_screen "kiro busy on tmux" unknown "$CAPS_TMUX" "$busy" 1
+  assert_screen "kiro busy on herdr" unknown "$CAPS_STYLED" "$busy"
+  assert_screen "kiro busy on cmux/orca" unknown "$CAPS_PLAIN" "$busy"
+  # Real typed text: no container proof, must NOT read pending.
+  typed=$'some transcript output\nfix the login bug'
+  assert_screen "kiro typed text on tmux" unknown "$CAPS_TMUX" "$typed" 1
+  assert_screen "kiro typed text on herdr" unknown "$CAPS_STYLED" "$typed"
+  assert_screen "kiro typed text on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  # Busy wins over idle when both are somehow visible.
+  local both=$'ask a question or describe a task\nKiro is working · Type to steer · Ctrl+S to queue'
+  assert_screen "kiro busy wins over idle" unknown "$CAPS_STYLED" "$both"
+  pass "matrix: kiro's text-keyed classification proves empty from idle placeholder, unknown for everything else"
+}
+
 test_selected_content_is_composer_scoped_and_wrap_normalized() {
   local screen out
   screen=$'hello captain in transcript\n╭────────────────────╮\n│ unrelated          │\n│ draft               │\n╰────────────────────╯'
@@ -633,6 +663,7 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+test_matrix_kiro_text_keyed_classification
 
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out

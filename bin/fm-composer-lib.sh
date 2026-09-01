@@ -67,6 +67,15 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   kiro-text  - kiro: a bare row with NO prompt glyph, NO border, NO
+#                left-bar, and NO separator pair. A structural read cannot
+#                serve because kiro-cli 2.18.0 draws none of the box-drawing,
+#                glyph, bar, or separator elements the structural scan
+#                recognises. The only provable verdicts come from text pattern
+#                matching against two known kiro strings: the idle placeholder
+#                "ask a question or describe a task" proves empty, and the
+#                mid-turn "Kiro is working" proves not-idle (unknown). All
+#                other content returns to the caller's default (unknown).
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -311,7 +320,7 @@ fm_composer_strip_ghost() {
 # part of that union for the same reason the others are: without it a cursor
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop|Kiro is working'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
@@ -325,6 +334,7 @@ FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # injection. Cursor's recorded worker state comes from its transcript fold in
 # bin/fm-busy-lib.sh, never from this row.
 FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT='Kiro is working'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -339,6 +349,7 @@ fm_busy_lines_match() {  # [harness]
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
+      kiro) regex=$FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
@@ -369,7 +380,7 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$|^ask a question or describe a task'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1183,6 +1194,33 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# _fm_composer_kiro_text_verdict: text-keyed classification for kiro-cli, which
+# draws NO structural container - no box, no prompt glyph, no left-bar, no
+# separator pair - so the structural scan finds nothing and every other shape
+# path returns unknown. The idle placeholder and mid-turn busy indicator are
+# the only kiro-specific screen evidence available; all other content is
+# indistinguishable from arbitrary terminal output without container proof.
+# Returns 0 with a verdict on stdout when a kiro pattern is matched; returns 1
+# when no pattern is found so the caller falls through to its own default.
+_fm_composer_kiro_text_verdict() {  # <plain-screen>
+  local plain=$1 line trimmed kiro_idle_seen=0
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      *'Kiro is working'*) printf 'unknown'; return 0 ;;
+    esac
+    if printf '%s' "$trimmed" | grep -qiE '^ask a question or describe a task$'; then
+      kiro_idle_seen=1
+    fi
+  done <<EOF
+$plain
+EOF
+  if [ "$kiro_idle_seen" = 1 ]; then printf 'empty'; return 0; fi
+  return 1
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
@@ -1246,6 +1284,9 @@ EOF
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
       return 0
     fi
+    # Kiro text-keyed fallback: no structural shape contains the cursor; try
+    # the kiro-specific text patterns before the strict rule rejects.
+    _fm_composer_kiro_text_verdict "$plain" && return 0
     if [ "$FM_COMPOSER_SCAN_CURSOR_EDGE" = 1 ]; then
       printf 'unknown'; return 0
     fi
@@ -1259,6 +1300,7 @@ EOF
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
   if ! _fm_composer_select_cursorless "$plain"; then
+    _fm_composer_kiro_text_verdict "$plain" && return 0
     printf 'unknown'
     return 0
   fi

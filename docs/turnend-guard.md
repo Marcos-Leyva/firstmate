@@ -155,6 +155,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- Kiro CLI 2.18.0 has workspace-local agent-config hooks (`userPromptSubmit`, `stop`) but no `asyncRewake` or hook-driven continuation, so it has no primary guard integration and remains outside the primary integrations above.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage

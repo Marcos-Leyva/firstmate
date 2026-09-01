@@ -1269,6 +1269,14 @@ launch_template() {
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
     cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # kiro-cli (Kiro CLI): --trust-all-tools suppresses all tool-permission
+    # prompts (after a one-time global consent dialog already accepted on this
+    # machine). --tui forces the interactive TUI. --agent selects a workspace-
+    # local agent config that carries hooks, prompt, and resources. The
+    # positional [INPUT] auto-submits as the first prompt. Foreign primary
+    # markers are cleared at the launch boundary because kiro does NOT unset
+    # inherited CLAUDECODE, CURSOR_AGENT, etc.
+    kiro) printf '%s' 'env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u AI_AGENT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS __KIROBIN__ chat --agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__--trust-all-tools --tui "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1347,6 +1355,11 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = kiro ]; then
+  echo "error: kiro is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -1402,6 +1415,25 @@ fi
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
+}
+
+resolve_kiro_binary() {
+  local candidate dir
+  candidate=$(command -v kiro-cli 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+      /*) printf '%s\n' "$candidate"; return 0 ;;
+      *)
+        dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+        if [ -n "$dir" ]; then
+          printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "error: kiro-cli executable not found on PATH; install Kiro CLI or select a different verified harness" >&2
+  return 1
 }
 
 resolve_kimi_binary() {
@@ -1481,7 +1513,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|kiro|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1534,6 +1566,13 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    kiro)
+      # kiro-cli 2.18.0 accepts --effort with the full shared vocabulary and
+      # no validation (even invalid values are silently accepted). Map 1:1.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1574,6 +1613,13 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__KIROBIN__*)
+    KIRO_BIN=$(resolve_kiro_binary) || exit 1
+    LAUNCH=${LAUNCH//__KIROBIN__/$(shell_quote "$KIRO_BIN")}
     ;;
 esac
 
@@ -2528,7 +2574,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|kiro*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2568,6 +2614,31 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      ;;
+    kiro*)
+      # Kiro agent config with hooks. The agent config at
+      # <worktree>/.kiro/agents/<name>.json carries hooks, prompt, and resources.
+      # userPromptSubmit opens a turn; stop closes it. Like Claude, stop does NOT
+      # fire on interrupt, so the same gap handling applies.
+      KIRO_AGENT_NAME="fm-${ID}"
+      KIRO_AGENT_DIR="$WT/.kiro/agents"
+      mkdir -p "$KIRO_AGENT_DIR"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source kiro-hook"
+      kiro_submit_cmd=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+      kiro_stop_cmd=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      cat > "$KIRO_AGENT_DIR/${KIRO_AGENT_NAME}.json" <<EOF
+{
+  "name": "$KIRO_AGENT_NAME",
+  "prompt": "You are a firstmate crewmate. Follow your instructions exactly.",
+  "hooks": {
+    "userPromptSubmit": [{"type": "command", "command": "$kiro_submit_cmd"}],
+    "stop": [{"type": "command", "command": "$kiro_stop_cmd"}]
+  }
+}
+EOF
+      exclude_path '.kiro/agents'
+      LAUNCH=${LAUNCH//__KIROAGENT__/$KIRO_AGENT_NAME}
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
