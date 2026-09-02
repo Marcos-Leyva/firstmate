@@ -908,6 +908,9 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
+# When a declared pause coexists with a provably-working run, the pause wins: the
+# worker said it is waiting and the active run confirms the pipeline is alive, so
+# route to the bounded pause cadence instead of the wedge timer.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
@@ -939,8 +942,8 @@ pause_state_class() {  # <window> <task>
   fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$kind" != secondmate ]; then
