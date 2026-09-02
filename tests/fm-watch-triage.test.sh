@@ -2225,7 +2225,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
 }
 
-test_nonterminal_paused_rechecks_authoritative_state() {
+test_nonterminal_paused_with_active_run_retains_pause_cadence() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case nonterminal-paused-recheck); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-recheck"
@@ -2246,13 +2246,13 @@ test_nonterminal_paused_rechecks_authoritative_state() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"
+    reap "$pid"; fail "an active run behind a declared pause surfaced instead of absorbing: $(cat "$out")"
   fi
-  [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run retained paused mode"; }
-  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "authoritative active run did not resume wedge tracking"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "active run with declared pause did not retain pause mode"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "active run with declared pause should not start wedge tracking"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
-  pass "a declared pause is periodically rechecked against authoritative active-run state"
+  pass "a declared pause with an active run retains the pause cadence, no wedge timer"
 }
 
 test_paused_with_active_run_uses_pause_cadence_not_wedge_timer() {
@@ -3925,7 +3925,7 @@ test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
-test_nonterminal_paused_rechecks_authoritative_state
+test_nonterminal_paused_with_active_run_retains_pause_cadence
 test_paused_with_active_run_uses_pause_cadence_not_wedge_timer
 test_working_run_without_declared_pause_still_wedge_escalates
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
