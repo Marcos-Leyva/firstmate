@@ -52,7 +52,7 @@ FM_PROJECT_BASE_BRANCH=""
 # The concrete reason an override file could not be trusted, else empty.
 FM_PROJECT_BASE_BRANCH_ERROR=""
 # Set by fm_project_default_branch: the resolved base branch name.
-FM_PROJECT_DEFAULT_BRANCH=""
+export FM_PROJECT_DEFAULT_BRANCH=""
 
 fm_project_base_branch_fail() {  # <reason>
   FM_PROJECT_BASE_BRANCH=""
