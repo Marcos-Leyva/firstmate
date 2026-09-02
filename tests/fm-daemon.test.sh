@@ -1291,8 +1291,16 @@ test_housekeeping_herdr_idle_busy_record_clears_stale() {
       [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
       printf 'idle'
     }
+    # The agent is genuinely registered in this pane - that is the premise of
+    # the case - so the agent-presence override must not contradict the record.
+    fm_backend_agent_state() {
+      [ "$1" = herdr ] || fail "expected herdr agent-state backend, got $1"
+      [ "$2" = "default:w1:p4" ] || fail "expected herdr agent-state target, got $2"
+      printf 'alive'
+    }
     fm_backend_capture herdr default:w1:p4 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p4)" = idle ] || fail "herdr busy stub did not report idle"
+    [ "$(fm_backend_agent_state herdr default:w1:p4)" = alive ] || fail "herdr agent stub did not report alive"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr idle busy-footer housekeeping failed"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "idle-native busy-record herdr stale marker was not cleared"
@@ -1319,8 +1327,16 @@ test_housekeeping_herdr_resumed_stale_cleared() {
       [ "$2" = "default:w1:p3" ] || fail "expected herdr busy target, got $2"
       printf 'busy'
     }
+    # A natively busy pane necessarily has an agent in it; the presence probe
+    # must agree rather than reaching for the host's own herdr server.
+    fm_backend_agent_state() {
+      [ "$1" = herdr ] || fail "expected herdr agent-state backend, got $1"
+      [ "$2" = "default:w1:p3" ] || fail "expected herdr agent-state target, got $2"
+      printf 'alive'
+    }
     fm_backend_capture herdr default:w1:p3 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p3)" = busy ] || fail "herdr busy stub did not report busy"
+    [ "$(fm_backend_agent_state herdr default:w1:p3)" = alive ] || fail "herdr agent stub did not report alive"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr resumed stale housekeeping failed"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "busy herdr stale marker was not cleared"

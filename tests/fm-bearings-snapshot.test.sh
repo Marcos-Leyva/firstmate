@@ -35,6 +35,12 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  list-windows)
+    # This fixture models pane reads, not tmux's window inventory or process
+    # identity, so it reports the read as unreadable rather than answering with
+    # an empty inventory that would look like an authoritatively absent window.
+    echo 'list-windows: not modeled by this fixture' >&2
+    exit 1 ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;
