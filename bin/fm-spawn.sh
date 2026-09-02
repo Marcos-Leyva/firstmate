@@ -2968,6 +2968,51 @@ EOF
   esac
 fi
 
+# A secondmate agent is a WORKER in the captain's billing split, so it carries the
+# same provider configuration a crewmate gets: only the firstmate PRIMARY - which
+# is never launched through this script - stays on the direct Anthropic
+# subscription. The wiring gate above deliberately skips busy-state arming and
+# turn-end hooks for a secondmate (its home is a firstmate checkout whose own
+# tracked .claude/settings.json arms the primary-harness supervision path), but
+# the provider configuration is not part of that wiring, so it is written here
+# from the SAME config/crew-bedrock kill switch and config/crew-bedrock-values
+# the home already inherits for its own crewmates. One switch per home keeps the
+# account configuration in one place, so a rotated account cannot leave a stale
+# second copy silently billing the wrong provider.
+#
+# Two differences from the crewmate write above, both deliberate:
+#
+#   - No hooks key. The home's tracked .claude/settings.json owns the primary
+#     harness's own hooks; this file only adds provider keys next to them, and
+#     writing nothing at all when there are no provider keys is exactly the
+#     hooks-only degradation a crewmate gets.
+#   - No exclude_path. `git rev-parse --git-path info/exclude` resolves to the
+#     COMMON git dir, so for a treehouse-leased home (a worktree of the firstmate
+#     repo) that write would land in the PRIMARY checkout's .git, outside the
+#     secondmate home entirely. The repo's own tracked .gitignore carries
+#     .claude/settings.local.json instead, which keeps every firstmate checkout
+#     clean without writing outside the home. Cleanliness is load-bearing here:
+#     the guarded pre-launch sync and the bootstrap convergence sweep both SKIP a
+#     dirty home, so an untracked file in git's view would silently cut the home
+#     off from every future instruction-surface update.
+#
+# A write failure warns and launches anyway, because a billing preference never
+# fails a launch.
+if [ "$KIND" = secondmate ]; then
+  case "$HARNESS" in
+    claude*)
+      SECONDMATE_BEDROCK_KEYS=
+      if crew_bedrock_enabled; then SECONDMATE_BEDROCK_KEYS=$(crew_bedrock_settings_fragment); fi
+      if [ -n "$SECONDMATE_BEDROCK_KEYS" ]; then
+        if ! { mkdir -p "$WT/.claude" \
+            && printf '{%s}\n' "${SECONDMATE_BEDROCK_KEYS%,}" > "$WT/.claude/settings.local.json"; }; then
+          echo "warning: could not write the Bedrock provider configuration for secondmate $ID at $WT/.claude/settings.local.json; it will bill whatever its own environment selects" >&2
+        fi
+      fi
+      ;;
+  esac
+fi
+
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a secondmate's posture is fixed; a scout
