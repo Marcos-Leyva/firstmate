@@ -2685,10 +2685,16 @@ EOF
       exclude_path '.claude/settings.local.json'
       ;;
     kiro*)
-      # Kiro agent config with hooks. The agent config at
-      # <worktree>/.kiro/agents/<name>.json carries hooks, prompt, and resources.
+      # Kiro agent config with hooks at <worktree>/.kiro/agents/<name>.json.
       # userPromptSubmit opens a turn; stop closes it. Like Claude, stop does NOT
       # fire on interrupt, so the same gap handling applies.
+      # tools: ["*"] is required: kiro-cli 2.18.0 grants zero tools when the
+      # field is omitted, so the worker would be unable to read, write, or run
+      # shell commands. ["*"] matches the --trust-all-tools autonomy contract.
+      # Other kiro template fields (allowedTools, toolAliases, toolsSettings,
+      # mcpServers, includeMcpJson, model, permissions) are omitted: model is
+      # handled by the --model CLI flag, permissions by --trust-all-tools, and
+      # the rest have no firstmate use case.
       KIRO_AGENT_NAME="fm-${ID}"
       KIRO_AGENT_DIR="$WT/.kiro/agents"
       mkdir -p "$KIRO_AGENT_DIR"
@@ -2696,10 +2702,49 @@ EOF
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source kiro-hook"
       kiro_submit_cmd=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
       kiro_stop_cmd=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      # For no-mistakes delivery, generate a procedure file from the installed
+      # binary's own help output and point the agent config's prompt at it via
+      # file:// URI. The file:// path resolves relative to the agent config
+      # file's own directory (.kiro/agents/), so the procedure file is
+      # colocated. When no-mistakes is absent, the procedure file is silently
+      # skipped (same degradation pattern as crew_bedrock_settings_fragment);
+      # the brief's DOD text still carries the contract.
+      KIRO_PROMPT="You are a firstmate crewmate. Follow your instructions exactly."
+      if [ "${MODE:-}" = no-mistakes ]; then
+        KIRO_NM_PROCEDURE="$KIRO_AGENT_DIR/${KIRO_AGENT_NAME}-nm-procedure.md"
+        nm_run_help=$(no-mistakes axi run --help 2>/dev/null) || nm_run_help=""
+        nm_respond_help=$(no-mistakes axi respond --help 2>/dev/null) || nm_respond_help=""
+        if [ -n "$nm_run_help" ]; then
+          cat > "$KIRO_NM_PROCEDURE" <<NMPROCEOF
+# no-mistakes validation procedure
+
+Firstmate will instruct you to start the no-mistakes validation pipeline.
+Drive it through \`no-mistakes axi\` shell commands (not a slash command).
+
+## Starting a run
+
+\`\`\`
+$nm_run_help
+\`\`\`
+
+## Responding to gates
+
+\`\`\`
+$nm_respond_help
+\`\`\`
+
+## Authoritative mechanics
+
+\`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+NMPROCEOF
+          KIRO_PROMPT="file://${KIRO_AGENT_NAME}-nm-procedure.md"
+        fi
+      fi
       cat > "$KIRO_AGENT_DIR/${KIRO_AGENT_NAME}.json" <<EOF
 {
   "name": "$KIRO_AGENT_NAME",
-  "prompt": "You are a firstmate crewmate. Follow your instructions exactly.",
+  "tools": ["*"],
+  "prompt": "$KIRO_PROMPT",
   "hooks": {
     "userPromptSubmit": [{"type": "command", "command": "$kiro_submit_cmd"}],
     "stop": [{"type": "command", "command": "$kiro_stop_cmd"}]
