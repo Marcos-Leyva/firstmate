@@ -4,6 +4,7 @@ data/
 scratchpad*
 .no-mistakes/
 .lavish/
+.claude/settings.local.json
 .fm-secondmate-home
 .fm-secondmate-parent
 .DS_Store

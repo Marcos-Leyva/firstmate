@@ -966,6 +966,170 @@ test_bedrock_values_file_with_valid_json_lands_keys_in_worktree() {
   pass "valid config/crew-bedrock-values lands env and modelOverrides in the worker worktree"
 }
 
+# --- secondmate provider configuration --------------------------------------
+#
+# A secondmate agent is a worker in the same billing split, so it reads the same
+# two config files. Its home is a long-lived firstmate checkout instead of a
+# disposable task worktree, so these cases assert the load-bearing extra
+# guarantee: the provider write leaves the home reporting clean, and touches
+# nothing in the checkout the home was leased from.
+#
+# The home is built as a real linked worktree of a firstmate-shaped repo that
+# carries this repo's own tracked .gitignore, so the cleanliness assertions
+# exercise the ignore rules firstmate actually ships rather than a rule the test
+# invented.
+make_git_secondmate_home() {  # <parent-repo> <home> <id>
+  local repo=$1 home=$2 id=$3
+  fm_git_init_commit "$repo"
+  cp "$ROOT/.gitignore" "$repo/.gitignore"
+  printf '# Firstmate\n' > "$repo/AGENTS.md"
+  mkdir -p "$repo/.claude"
+  printf '%s\n' '{"hooks":{}}' > "$repo/.claude/settings.json"
+  git -C "$repo" add .gitignore AGENTS.md .claude/settings.json
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'firstmate-shaped home'
+  git -C "$repo" worktree add --quiet -b "sm-$id" "$home"
+  # bin/ is an empty untracked directory, which git does not report, exactly as a
+  # leased home's own operational directories are ignored outright.
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+}
+
+assert_repo_clean() {  # <dir> <label>
+  local dir=$1 label=$2 dirty
+  dirty=$(git -C "$dir" status --porcelain 2>&1) \
+    || fail "could not read git status for $label at $dir"
+  [ -z "$dirty" ] || fail "$label must report clean, got: $dirty"
+}
+
+assert_secondmate_provider_keys() {  # <settings-file>
+  local settings=$1
+  assert_present "$settings" "the secondmate did not receive a provider settings file"
+  assert_bedrock_keys_present "$settings"
+  # The home's own tracked .claude/settings.json owns the primary harness hooks,
+  # so this file adds provider keys only.
+  [ "$(jq -r 'keys | join(",")' "$settings")" = "env,modelOverrides" ] \
+    || fail "secondmate provider settings must carry only env and modelOverrides"
+}
+
+test_claude_secondmate_carries_bedrock_provider_and_leaves_every_checkout_clean() {
+  local rec id sm smrepo out status exclude_before exclude_after excl
+  id=profile-claude-secondmate-bedrock-z41
+  rec=$(make_spawn_case profile-claude-secondmate-bedrock claude "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+  smrepo="$CASE_DIR/secondmate-repo"
+  sm="$CASE_DIR/secondmate-home"
+  make_git_secondmate_home "$smrepo" "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  assert_repo_clean "$sm" "a freshly seeded secondmate home"
+  excl=$(git -C "$sm" rev-parse --git-path info/exclude)
+  exclude_before=$(cat "$excl" 2>/dev/null || true)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed: $out"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" \
+    "the secondmate did not launch on the claude harness"
+  assert_secondmate_provider_keys "$sm/.claude/settings.local.json"
+  assert_repo_clean "$sm" "a secondmate home after the provider write"
+  assert_repo_clean "$smrepo" "the checkout the secondmate home was leased from"
+  exclude_after=$(cat "$excl" 2>/dev/null || true)
+  [ "$exclude_before" = "$exclude_after" ] \
+    || fail "the provider write must not touch the shared git exclude file at $excl"
+  assert_absent "$HOME_DIR/.claude" "the parent home must receive no provider settings"
+  pass "a claude secondmate bills Bedrock and leaves its home and lease source clean"
+}
+
+test_crew_bedrock_off_leaves_a_secondmate_without_provider_settings() {
+  local rec id sm smrepo out status
+  id=profile-claude-secondmate-bedrock-off-z42
+  rec=$(make_spawn_case profile-claude-secondmate-bedrock-off claude "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+  printf 'off\n' > "$HOME_DIR/config/crew-bedrock"
+  smrepo="$CASE_DIR/secondmate-repo"
+  sm="$CASE_DIR/secondmate-home"
+  make_git_secondmate_home "$smrepo" "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate spawn with the provider switched off should succeed: $out"
+  assert_absent "$sm/.claude/settings.local.json" \
+    "config/crew-bedrock=off must leave the secondmate on its own environment's billing"
+  assert_repo_clean "$sm" "a secondmate home with the provider switched off"
+  pass "config/crew-bedrock=off writes no secondmate provider settings"
+}
+
+test_absent_bedrock_values_leave_a_secondmate_without_provider_settings_silently() {
+  local rec id sm smrepo out status
+  id=profile-claude-secondmate-bedrock-absent-z43
+  rec=$(make_spawn_case profile-claude-secondmate-bedrock-absent claude "$id")
+  read_case_record "$rec"
+  assert_absent "$HOME_DIR/config/crew-bedrock" "the absent case must not set the kill switch"
+  assert_absent "$HOME_DIR/config/crew-bedrock-values" "the absent case must not have a values file"
+  smrepo="$CASE_DIR/secondmate-repo"
+  sm="$CASE_DIR/secondmate-home"
+  make_git_secondmate_home "$smrepo" "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate spawn without a values file should succeed: $out"
+  assert_not_contains "$out" "crew-bedrock-values" \
+    "an absent values file must not mention crew-bedrock-values"
+  assert_absent "$sm/.claude/settings.local.json" \
+    "an absent values file must leave the secondmate without provider settings"
+  assert_repo_clean "$sm" "a secondmate home with no values file"
+  pass "an absent config/crew-bedrock-values leaves a secondmate unconfigured, silently"
+}
+
+test_malformed_bedrock_values_warn_and_never_fail_a_secondmate_launch() {
+  local rec id sm smrepo out status
+  id=profile-claude-secondmate-bedrock-malformed-z44
+  rec=$(make_spawn_case profile-claude-secondmate-bedrock-malformed claude "$id")
+  read_case_record "$rec"
+  printf 'not json at all\n' > "$HOME_DIR/config/crew-bedrock-values"
+  smrepo="$CASE_DIR/secondmate-repo"
+  sm="$CASE_DIR/secondmate-home"
+  make_git_secondmate_home "$smrepo" "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a malformed values file must not fail a secondmate launch: $out"
+  assert_contains "$out" "warning:" "a malformed values file must warn"
+  assert_contains "$out" "hooks-only" "the malformed warning must name the fallback"
+  assert_absent "$sm/.claude/settings.local.json" \
+    "a malformed values file must leave the secondmate without provider settings"
+  assert_repo_clean "$sm" "a secondmate home with a malformed values file"
+  pass "a malformed config/crew-bedrock-values warns and still launches the secondmate"
+}
+
+test_non_claude_secondmate_receives_no_claude_provider_settings() {
+  local rec id sm smrepo out status
+  id=profile-codex-secondmate-bedrock-z45
+  rec=$(make_spawn_case profile-codex-secondmate-bedrock codex "$id")
+  read_case_record "$rec"
+  install_fake_bedrock_values "$HOME_DIR"
+  smrepo="$CASE_DIR/secondmate-repo"
+  sm="$CASE_DIR/secondmate-home"
+  make_git_secondmate_home "$smrepo" "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a codex secondmate spawn should succeed: $out"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" \
+    "the secondmate did not launch on the codex harness"
+  assert_absent "$sm/.claude/settings.local.json" \
+    "a non-claude secondmate must receive no claude settings file"
+  assert_repo_clean "$sm" "a codex secondmate home"
+  pass "a non-claude secondmate receives no claude provider settings"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -1003,5 +1167,10 @@ test_unrecognized_crew_bedrock_value_warns_and_keeps_the_default
 test_absent_bedrock_values_file_produces_hooks_only_settings
 test_malformed_bedrock_values_file_warns_and_falls_back
 test_bedrock_values_file_with_valid_json_lands_keys_in_worktree
+test_claude_secondmate_carries_bedrock_provider_and_leaves_every_checkout_clean
+test_crew_bedrock_off_leaves_a_secondmate_without_provider_settings
+test_absent_bedrock_values_leave_a_secondmate_without_provider_settings_silently
+test_malformed_bedrock_values_warn_and_never_fail_a_secondmate_launch
+test_non_claude_secondmate_receives_no_claude_provider_settings
 
 echo "# all fm-spawn-dispatch-profile tests passed"
