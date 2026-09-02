@@ -2255,45 +2255,105 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
-test_paused_authoritative_working_preserves_wedge_timer() {
-  local dir state fakebin out capture_file window key pane_hash sig pid since
-  dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-paused-working"
+test_paused_with_active_run_uses_pause_cadence_not_wedge_timer() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case paused-working-pause-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-paused-working"
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-working.meta"
-  printf 'paused: awaiting the upstream release\n' > "$state/paused-working.status"
-  sig=$(seen_sig "$state/paused-working.status"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
+  statusf="$state/paused-working.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
+  # Phase A: first sighting - a declared pause with an active run is absorbed
+  # on the pause cadence, NOT the wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a paused crew with an active run (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "paused crew with active run printed a wake reason during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "paused crew with active run enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced"
+  [ -e "$state/.paused-$key" ] || fail "paused flag not recorded despite declared pause with active run"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a declared pause with an active run must not start the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional paused phase-A stop"
+
+  # Phase B: age the pause past the re-surface threshold and confirm it
+  # re-surfaces as a paused recheck, NEVER as a possible wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-paused-working_status"
+  : > "$out"
+  printf 'idle awaiting external (token 2)\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a paused crew with active run past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "re-surface was not labeled a paused/awaiting-external recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a declared pause with an active run was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a declared pause with an active run uses the pause cadence, not the wedge timer, and re-surfaces as a recheck"
+}
+
+# Safety-net companion: an active run WITHOUT a declared pause still uses the
+# wedge timer and escalates. This verifies the fix above is targeted: only
+# declared pauses change the cadence, not all working runs.
+test_working_run_without_declared_pause_still_wedge_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid since
+  dir=$(make_case working-no-pause-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-working-no-pause"
+  printf 'idle building output\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/working-no-pause.meta"
+  printf 'working: still monitoring ci\n' > "$state/working-no-pause.status"
+  sig=$(seen_sig "$state/working-no-pause.status"); printf '%s' "$sig" > "$state/.seen-working-no-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # Phase A: first sighting absorbs and starts the wedge timer.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
+  wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "working state without pause did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
-  sleep 2
-  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
-    || { reap "$pid"; fail "repeat authoritative working recheck reset the wedge timer"; }
   reap "$pid"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional authoritative-working stop"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional working phase-A stop"
 
+  # Phase B: backdate timer past the threshold and confirm it escalates as a wedge.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "authoritative working state did not wedge-escalate past the threshold"
-  grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
-  [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
+  wait_for_exit "$pid" 100 || fail "working state without pause did not wedge-escalate past the threshold"
+  grep -F "possible wedge" "$out" >/dev/null || fail "working wedge escalation omitted its reason"
+  [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after escalation"
+  [ ! -e "$state/.paused-$key" ] || fail "pause flag was set despite no declared pause"
   unset FM_FAKE_CREW_STATE
-  pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
+  pass "an active run without a declared pause still uses the wedge timer and escalates"
 }
 
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
@@ -3866,7 +3926,8 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
-test_paused_authoritative_working_preserves_wedge_timer
+test_paused_with_active_run_uses_pause_cadence_not_wedge_timer
+test_working_run_without_declared_pause_still_wedge_escalates
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
