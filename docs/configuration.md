@@ -244,6 +244,36 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Project base branch (config/project-base-branch)
+
+`config/project-base-branch` is an optional local, gitignored file that names the branch a project's work actually starts from and lands on, for the projects whose real working branch is not the default branch their forge reports.
+Set it for a project that keeps, say, `main` as its GitHub default while `develop` is the branch work belongs on, which is common when the forge setting is not yours to change.
+Firstmate only reads a forge's default-branch setting and never writes one, so this file is the whole mechanism.
+
+Each entry is one line of `<project-name> <branch>`, keyed by the project's clone directory name - the same key [`data/projects.md`](#secondmate-routes-datasecondmatesmd) and `bin/fm-project-mode.sh` use.
+Blank lines are ignored, and so are comment lines whose first non-blank character is `#`.
+
+```
+# the real working branch, deliberately not the GitHub default
+memo-forges develop
+```
+
+Absence is the unconfigured default and changes nothing.
+A home with no file, or a file that simply does not list a project, resolves that project exactly as before: its clone's `origin/HEAD`, then a local `main` or `master`.
+
+A file that is present but cannot be trusted is an actionable error rather than a fall back to the forge's answer, because that fall back is the silent wrong-base failure this setting exists to prevent.
+A symlinked, non-regular, or unreadable file is refused, as is any malformed entry: a line that is not exactly two fields, an invalid project name, a branch name `git check-ref-format` rejects or that begins with a dash, or a project listed twice.
+Every entry is validated even when it names some other project, since one malformed line means the file cannot prove the requested project is absent from it.
+A non-empty file must also end in a newline, so a write truncated mid-line is refused instead of resolving a half-written project name to no override.
+An empty file configures nothing and is accepted.
+
+The setting applies to every base-branch consumer, not only to where a task starts: the task worktree a spawn is created from, the base `bin/fm-review-diff.sh` reviews a task branch against, the branch `bin/fm-merge-local.sh` fast-forwards for an approved local-only landing, the branch `bin/fm-fleet-sync.sh` keeps a clone current on, and the landed-work gates in `bin/fm-teardown.sh`.
+A spawn additionally stops resolving `origin/HEAD` from the forge for that project, so an explicit `git remote set-head origin <branch>` in a clone is no longer overwritten before each dispatch.
+Firstmate's own repo and secondmate homes are not project-override subjects and are unaffected.
+
+The file is inherited by secondmate homes under the primary-authoritative contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), because a secondmate clones the same projects and has to land work on the same branch.
+[`bin/fm-project-base-branch-lib.sh`](../bin/fm-project-base-branch-lib.sh) owns exact parsing, validation, and resolution mechanics.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

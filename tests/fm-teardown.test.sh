@@ -233,6 +233,22 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# The same squash landing, but onto an arbitrary origin branch. Used to prove the
+# landed-work gates measure against the project's configured base branch rather
+# than the branch the forge calls default. Args: case_dir branch file content
+land_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land_branch"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -B "$branch" "origin/$branch" 2>/dev/null \
+    || git -C "$tmp" checkout -q -b "$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file on $branch"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -2663,3 +2679,76 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+# --- per-project base-branch override --------------------------------------
+#
+# Teardown's landed-work gates decide whether a task's commits may be discarded,
+# so they have to measure against the branch the project actually lands on, not
+# the branch its forge calls default (bin/fm-project-base-branch-lib.sh;
+# docs/configuration.md "Project base branch").
+
+test_landed_work_is_measured_against_the_configured_base_branch() {
+  local case_dir rc
+  # The work is squash-landed on develop and never reaches main. Without an
+  # override teardown must still refuse, because main genuinely lacks the content.
+  case_dir=$(make_case base-branch-no-override)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" develop feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "base-branch: work landed only on develop must not read as landed against main"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "base-branch: teardown did not refuse work absent from the forge default"
+
+  # With the project's real base branch configured, the same landing is landed.
+  case_dir=$(make_case base-branch-override)
+  printf '%s\n' '# real working branch, deliberately not the forge default' \
+    'project develop' > "$case_dir/config/project-base-branch"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" develop feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" \
+    "base-branch: teardown should recognize work landed on the configured branch: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "base-branch: teardown refused work landed on the configured branch"
+  [ "$(git --git-dir="$case_dir/origin.git" symbolic-ref HEAD)" = refs/heads/main ] \
+    || fail "base-branch: teardown rewrote the remote's default branch"
+  pass "the landed-work gate measures against the configured base branch, and never rewrites the forge default"
+}
+
+test_untrustworthy_base_branch_override_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case base-branch-untrusted)
+  # Two entries for one project: ambiguous, so resolving it would be a guess, and
+  # guessing the base is exactly what could discard unlanded work here.
+  printf '%s\n' 'project develop' 'project main' \
+    > "$case_dir/config/project-base-branch"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "base-branch: teardown ran despite an untrustworthy override"
+  grep -q REFUSED "$case_dir/stderr" || fail "base-branch: no REFUSED line for a bad override"
+  grep -q 'project-base-branch' "$case_dir/stderr" \
+    || fail "base-branch: the refusal did not name the override file"
+  [ -d "$case_dir/wt" ] || fail "base-branch: a refused teardown removed the worktree"
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null \
+    || fail "base-branch: a refused teardown deleted the task branch"
+  pass "an untrustworthy base-branch override refuses teardown and leaves the work in place"
+}
+
+test_landed_work_is_measured_against_the_configured_base_branch
+test_untrustworthy_base_branch_override_refuses_teardown

@@ -290,6 +290,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-project-base-branch-lib.sh
+. "$SCRIPT_DIR/fm-project-base-branch-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
@@ -1826,6 +1828,21 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
 
+# This home's explicit base branch for the project, resolved before anything is
+# created so an untrustworthy override stops the spawn instead of starting a
+# worker from the wrong history. Empty means no override, which leaves the base
+# resolution in freshen_spawn_worktree_base exactly as it was
+# (bin/fm-project-base-branch-lib.sh). A secondmate's target is a firstmate home
+# rather than a project, so it is not a project-override subject.
+SPAWN_BASE_BRANCH=""
+if [ "$KIND" != secondmate ]; then
+  if ! fm_project_base_branch_resolve "$CONFIG" "$(basename "$PROJ_ABS")"; then
+    echo "error: $FM_PROJECT_BASE_BRANCH_ERROR" >&2
+    exit 1
+  fi
+  SPAWN_BASE_BRANCH=$FM_PROJECT_BASE_BRANCH
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
@@ -1951,20 +1968,30 @@ EOF
   printf '%s' "$lines" >&2
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+freshen_spawn_worktree_base() {  # <worktree> <base-branch-override>
+  local worktree=$1 override=$2 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ -n "$override" ]; then
+    # An explicit local base wins, and `remote set-head origin --auto` is
+    # deliberately skipped: it re-resolves origin/HEAD from the forge's own
+    # default-branch setting, which is what silently overwrote an operator's
+    # `git remote set-head origin <branch>` and started tasks from the wrong
+    # branch. A branch this project does not have still refuses loudly below,
+    # at the fetch of its target.
+    default=$override
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2529,7 +2556,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$SPAWN_BASE_BRANCH" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
