@@ -201,6 +201,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-project-base-branch-lib.sh
+. "$SCRIPT_DIR/fm-project-base-branch-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -746,6 +748,22 @@ CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 KIND=$TEARDOWN_META_KIND
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# Both landed-work gates below compare against the project's base branch, so an
+# override this home cannot trust is refused here, up front, rather than left to
+# degrade those gates into an opaque unlanded-work refusal. Empty means no
+# override and leaves both gates exactly as they were
+# (bin/fm-project-base-branch-lib.sh). A secondmate's recorded project is a
+# firstmate home rather than a project, so it is not a project-override subject.
+TEARDOWN_BASE_BRANCH_KEY=
+if [ "$KIND" != secondmate ] && [ -n "$PROJ" ]; then
+  TEARDOWN_BASE_BRANCH_KEY=$(basename "$PROJ")
+  if ! fm_project_base_branch_resolve "$CONFIG" "$TEARDOWN_BASE_BRANCH_KEY"; then
+    echo "REFUSED: $FM_PROJECT_BASE_BRANCH_ERROR" >&2
+    echo "Teardown cannot confirm whether this task's work landed without a trustworthy base branch." >&2
+    exit 1
+  fi
+fi
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -887,19 +905,14 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
 fi
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
+  if [ -n "$TEARDOWN_BASE_BRANCH_KEY" ]; then
+    fm_project_default_branch "$CONFIG" "$TEARDOWN_BASE_BRANCH_KEY" "$PROJ" || return 1
+  else
+    # A secondmate's recorded project is a firstmate home rather than a project,
+    # so it has no override subject and resolves exactly as it did before.
+    fm_git_default_branch "$PROJ" || return 1
   fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  printf '%s\n' "$FM_PROJECT_DEFAULT_BRANCH"
 }
 
 meta_value() {

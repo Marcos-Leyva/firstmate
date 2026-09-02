@@ -425,6 +425,254 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
 
+# --- per-project base-branch override ---------------------------------------
+#
+# The field failure these cover: a project whose real working branch is not the
+# default branch its forge reports. `remote set-head origin --auto` re-resolved
+# origin/HEAD from the forge before every spawn and silently overwrote the
+# operator's own choice, so the worktree was born from the wrong branch.
+# The override is a local map file under config/, keyed by clone directory name
+# (bin/fm-project-base-branch-lib.sh; docs/configuration.md).
+
+# Build a case whose forge default is `main` while the real working branch is
+# `develop`, and whose two branches carry different content, so a spawn that
+# started from the wrong one is provable by file contents rather than only by SHA.
+make_two_branch_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project origin pool publisher fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  git -C "$project" worktree add --quiet --detach "$pool" HEAD
+
+  git clone --quiet "file://$origin" "$publisher"
+  # develop carries a migration main does not have: the concrete divergence that
+  # made starting from the forge default wrong in the field.
+  git -C "$publisher" checkout --quiet -b develop
+  printf 'migration 074\n' > "$publisher/only-on-develop.txt"
+  git -C "$publisher" add only-on-develop.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm develop-work
+  git -C "$publisher" push --quiet origin develop
+  git -C "$publisher" checkout --quiet main
+  printf 'only on main\n' > "$publisher/only-on-main.txt"
+  git -C "$publisher" add only-on-main.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm main-work
+  git -C "$publisher" push --quiet origin main
+  # The forge keeps main as its default, exactly as the captain requires.
+  git --git-dir="$origin" symbolic-ref HEAD refs/heads/main
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin"
+}
+
+read_two_branch_case() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+  PROJECT_KEY=$(basename "$PROJECT_DIR")
+}
+
+write_base_branch_override() {  # <contents...>
+  printf '%s\n' "$@" > "$HOME_DIR/config/project-base-branch"
+}
+
+# The acceptance case: a real spawn in a project WITH an override starts from the
+# configured branch, not the branch the forge calls default.
+test_override_starts_ship_and_scout_from_configured_branch() {
+  local rec id out status contract
+  for contract in ship scout; do
+    id="pool-base-override-$contract-r12"
+    rec=$(make_two_branch_case "base-override-$contract" "$id")
+    read_two_branch_case "$rec"
+    write_base_branch_override "# real working branch, not the forge default" \
+      "$PROJECT_KEY develop"
+
+    if [ "$contract" = scout ]; then
+      out=$(run_spawn "$id" --scout)
+    else
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    fi
+    status=$?
+    expect_code 0 "$status" "$contract spawn should honor the project base-branch override"
+    assert_contains "$out" "spawned $id" "$contract spawn did not report success"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
+      || fail "$contract spawn did not start from the configured origin/develop"
+    assert_grep 'migration 074' "$POOL_DIR/only-on-develop.txt" \
+      "$contract spawn started without the content only the configured branch has"
+    [ ! -e "$POOL_DIR/only-on-main.txt" ] \
+      || fail "$contract spawn started from origin/main despite the override"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed %s override spawn: HEAD=%s origin/develop=%s origin/main=%s\n' \
+        "$contract" "$(git -C "$POOL_DIR" rev-parse --short HEAD)" \
+        "$(git -C "$POOL_DIR" rev-parse --short origin/develop)" \
+        "$(git -C "$POOL_DIR" rev-parse --short origin/main)"
+    fi
+  done
+  pass "a ship and a scout spawn both start from the configured base branch instead of the forge default"
+}
+
+# The regression: with no override the spawn resolves the forge default exactly as
+# before, including still running `remote set-head origin --auto`.
+test_no_override_still_starts_from_forge_default() {
+  local rec id out status
+  id='pool-base-no-override-r12'
+  rec=$(make_two_branch_case base-no-override "$id")
+  read_two_branch_case "$rec"
+  # Prove the auto-detect is still what decides: point the local origin/HEAD at
+  # develop first, so only a real `remote set-head --auto` pass moves it back.
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" remote set-head origin develop
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a spawn with no override should behave exactly as before"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "a spawn with no override did not start from the forge default origin/main"
+  assert_grep 'only on main' "$POOL_DIR/only-on-main.txt" \
+    "a spawn with no override started without the forge default branch content"
+  [ "$(git -C "$POOL_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/main ] \
+    || fail "a spawn with no override no longer re-resolves origin/HEAD from the forge"
+  pass "with no override the spawn still auto-detects and starts from the forge default"
+}
+
+# An override present but listing some other project is still no override here.
+test_override_for_another_project_changes_nothing() {
+  local rec id out status
+  id='pool-base-other-project-r12'
+  rec=$(make_two_branch_case base-other-project "$id")
+  read_two_branch_case "$rec"
+  write_base_branch_override 'some-other-project develop'
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an override for another project should not affect this spawn"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "an override naming another project changed this project's base"
+  pass "an override that does not list this project leaves its base unchanged"
+}
+
+# Fail closed: getting the base wrong is the failure this exists to prevent, so a
+# malformed file must never resolve to the forge default.
+test_malformed_override_refuses_spawn() {
+  local rec id out status before case_index bad expected
+  case_index=0
+  for bad in \
+    "$(printf 'PROJECT_KEY develop extra')" \
+    "$(printf 'PROJECT_KEY')" \
+    "$(printf 'PROJECT_KEY not..valid')" \
+    "$(printf 'PROJECT_KEY -dashed')" \
+    "$(printf 'PROJECT_KEY develop\nPROJECT_KEY main')" \
+    "$(printf '../escape develop')"; do
+    case_index=$((case_index + 1))
+    id="pool-base-malformed-$case_index-r12"
+    rec=$(make_two_branch_case "base-malformed-$case_index" "$id")
+    read_two_branch_case "$rec"
+    printf '%s\n' "${bad//PROJECT_KEY/$PROJECT_KEY}" > "$HOME_DIR/config/project-base-branch"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] \
+      || fail "spawn succeeded despite an untrustworthy base-branch override (case $case_index)"
+    assert_contains "$out" "project-base-branch" \
+      "the refusal did not name the override file (case $case_index)"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn moved the pooled worktree while refusing a bad override (case $case_index)"
+    [ ! -e "$POOL_DIR/only-on-main.txt" ] \
+      || fail "spawn fell back to the forge default instead of refusing (case $case_index)"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed malformed refusal %s: %s\n' "$case_index" \
+        "$(printf '%s\n' "$out" | grep 'project-base-branch' | head -n 1)"
+    fi
+  done
+  # A symlinked or unreadable file is untrustworthy for the same reason.
+  id='pool-base-symlink-r12'
+  rec=$(make_two_branch_case base-symlink "$id")
+  read_two_branch_case "$rec"
+  printf '%s develop\n' "$PROJECT_KEY" > "$CASE_DIR/elsewhere"
+  ln -s "$CASE_DIR/elsewhere" "$HOME_DIR/config/project-base-branch"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a symlinked base-branch override"
+  assert_contains "$out" "symlink" "the refusal did not name the symlink"
+  expected='is a symlink'
+  assert_contains "$out" "$expected" "the symlink refusal was not actionable"
+  pass "an untrustworthy base-branch override refuses the spawn instead of falling back to the forge default"
+}
+
+# A truncated write must not resolve a half-written project name to no override.
+test_truncated_override_refuses_spawn() {
+  local rec id out status
+  id='pool-base-truncated-r12'
+  rec=$(make_two_branch_case base-truncated "$id")
+  read_two_branch_case "$rec"
+  printf '%s deve' "$PROJECT_KEY" > "$HOME_DIR/config/project-base-branch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a truncated base-branch override"
+  assert_contains "$out" "does not end in a newline" \
+    "the refusal did not explain the truncation"
+  [ ! -e "$POOL_DIR/only-on-main.txt" ] \
+    || fail "a truncated override fell back to the forge default"
+  pass "a base-branch override truncated mid-entry refuses the spawn"
+}
+
+# An empty file is a created-but-unused override, not a malformed one.
+test_empty_override_is_unconfigured() {
+  local rec id out status
+  id='pool-base-empty-r12'
+  rec=$(make_two_branch_case base-empty "$id")
+  read_two_branch_case "$rec"
+  : > "$HOME_DIR/config/project-base-branch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an empty override file should configure nothing"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "an empty override file changed the resolved base"
+  pass "an empty base-branch override file configures nothing and changes no behavior"
+}
+
+# The forge's own default-branch setting is read-only to firstmate: an override
+# must never write it, which is the captain's hard constraint on this mechanism.
+test_override_never_writes_the_forge_default() {
+  local rec id out status before after
+  id='pool-base-readonly-forge-r12'
+  rec=$(make_two_branch_case base-readonly-forge "$id")
+  read_two_branch_case "$rec"
+  write_base_branch_override "$PROJECT_KEY develop"
+  before=$(git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "the override spawn should succeed"
+  assert_contains "$out" "spawned $id" "the override spawn did not report success"
+  after=$(git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD)
+  [ "$after" = "$before" ] \
+    || fail "the spawn rewrote the remote's default branch ($before -> $after)"
+  [ "$after" = refs/heads/main ] \
+    || fail "fixture did not keep the remote default at main"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remote HEAD unchanged: %s\n' "$after"
+  fi
+  pass "an override never writes the remote's default-branch setting"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
@@ -436,5 +684,12 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_override_starts_ship_and_scout_from_configured_branch
+test_no_override_still_starts_from_forge_default
+test_override_for_another_project_changes_nothing
+test_malformed_override_refuses_spawn
+test_truncated_override_refuses_spawn
+test_empty_override_is_unconfigured
+test_override_never_writes_the_forge_default
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

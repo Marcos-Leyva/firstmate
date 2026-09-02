@@ -38,6 +38,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-project-base-branch-lib.sh
+. "$SCRIPT_DIR/fm-project-base-branch-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -116,19 +119,7 @@ resolve_project_arg() {
 }
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_project_default_branch "$CONFIG" "$(basename "$PROJ")" "$PROJ"
 }
 
 first_line() {
@@ -346,10 +337,19 @@ sync_project() {
 
   prune_gone_branches || true
 
-  DEFAULT=$(default_branch) || {
-    echo "$label: skipped: cannot determine default branch"
+  # A clone whose real working branch is configured locally must be synced on
+  # that branch (bin/fm-project-base-branch-lib.sh). An override this home
+  # cannot trust is a loud per-project report, never a benign skip: syncing the
+  # forge's branch instead is the wrong-base failure the override prevents.
+  if ! default_branch; then
+    if [ -n "$FM_PROJECT_BASE_BRANCH_ERROR" ]; then
+      echo "$label: STUCK: $FM_PROJECT_BASE_BRANCH_ERROR - needs attention"
+    else
+      echo "$label: skipped: cannot determine default branch"
+    fi
     return 0
-  }
+  fi
+  DEFAULT=$FM_PROJECT_DEFAULT_BRANCH
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
