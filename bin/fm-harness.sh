@@ -52,9 +52,20 @@ detect_own() {
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   # kiro does NOT clear inherited CLAUDECODE, same hazard as cursor. Test
   # kiro-specific markers before CLAUDECODE so a kiro worker launched from a
-  # claude primary is not misidentified. KIRO_SESSION_ID is a UUID always
-  # present in kiro tool subprocesses (verified kiro-cli 2.18.0).
-  [ -n "${KIRO_SESSION_ID:-}" ] && { echo kiro; return; }
+  # claude primary is not misidentified. Three markers are accepted because
+  # kiro's own variable set is NOT stable across its agent engines:
+  # KIRO_SESSION_ID, which this test once relied on alone, is gone from V3 tool
+  # subprocesses (verified kiro-cli 2.18.0 / KAS 0.38.7). KIRO_VERSION and
+  # KIRO_CHAT_CLI_BIN are present under both the V2 and V3 engines, and
+  # KIRO_AGENT_ENGINE is set only by V3, so any one of them carries the verdict
+  # and losing a single vendor variable cannot blind detection again. Engine
+  # identity is deliberately NOT part of the verdict: every firstmate rule keyed
+  # on `kiro` applies to whichever engine the pane runs.
+  if [ -n "${KIRO_VERSION:-}" ] || [ -n "${KIRO_CHAT_CLI_BIN:-}" ] \
+     || [ -n "${KIRO_AGENT_ENGINE:-}" ]; then
+    echo kiro
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi

@@ -1291,7 +1291,16 @@ launch_template() {
     # positional [INPUT] auto-submits as the first prompt. Foreign primary
     # markers are cleared at the launch boundary because kiro does NOT unset
     # inherited CLAUDECODE, CURSOR_AGENT, etc.
-    kiro) printf '%s' 'env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u AI_AGENT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS __KIROBIN__ chat --agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__--trust-all-tools --tui "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --agent-engine v3 selects the KAS agent engine, which is what makes an
+    # interrupt safe for firstmate: V3 kills the shell child and its whole
+    # subprocess tree on Escape and Ctrl+C, while V2 orphans them and an orphan
+    # holding the tool's output pipe wedges the worker indefinitely (verified
+    # kiro-cli 2.18.0 / KAS 0.38.7). The engine is a launch flag, not a
+    # firstmate configuration axis: `--v3` is the shorter vendor-promoted alias
+    # for the same choice, and the long form is used because its value names the
+    # engine, so it survives the alias being retired once V3 becomes kiro's
+    # default. Reverting to V2 is removing this flag, not a config knob.
+    kiro) printf '%s' 'env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u AI_AGENT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u GROK_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS __KIROBIN__ chat --agent-engine v3 --agent __KIROAGENT__ __MODELFLAG____EFFORTFLAG__--trust-all-tools --tui "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2714,7 +2723,21 @@ EOF
     kiro*)
       # Kiro agent config with hooks at <worktree>/.kiro/agents/<name>.json.
       # userPromptSubmit opens a turn; stop closes it. Like Claude, stop does NOT
-      # fire on interrupt, so the same gap handling applies.
+      # fire on interrupt, and nothing at all fires when the agent is killed, so
+      # the same gap handling applies under both kiro agent engines.
+      # The hook keys stay camelCase deliberately. The V3 engine reports
+      # PascalCase event names in its payloads but accepts these camelCase config
+      # keys and fires them identically (verified kiro-cli 2.18.0 / KAS 0.38.7),
+      # while V2 is only verified for camelCase - so this spelling is the one that
+      # works on either engine, and registering both spellings would fire each
+      # hook twice.
+      # V3 also offers PreToolUse and PostToolUse hooks, and its PostToolUse
+      # payload carries "Exit Code: -1" when the active tool was cancelled. They
+      # are deliberately NOT wired here: busy state is a turn-scoped open/close
+      # contract owned by bin/fm-busy-lib.sh, tool-scoped events would be a new
+      # state machine, and the cancel marker still reports nothing for an
+      # interrupt during model thinking. Reconciling against agent presence
+      # remains the complete fix for both interrupt and kill.
       # tools: ["*"] is required: kiro-cli 2.18.0 grants zero tools when the
       # field is omitted, so the worker would be unable to read, write, or run
       # shell commands. ["*"] matches the --trust-all-tools autonomy contract.
