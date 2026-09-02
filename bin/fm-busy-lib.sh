@@ -5,11 +5,16 @@
 # (2026-07-28): each harness adapter reports turn lifecycle through a
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
-# process sleep state, marker mtimes, and the old global UI-regex OR are not
-# state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
-# owned by the watcher, not current-state truth.
+# unverified semantic data is UNKNOWN - never idle. Agent death is the only
+# process-level override and yields dead, never busy: a gone endpoint, and an
+# endpoint the backend can PROVE holds no agent, both outrank a busy semantic
+# verdict, because no hook survives kill -9 on any harness and the record it
+# never got to clear would otherwise report a corpse as working forever
+# (observed live 2026-09-01: three OOM-killed kiro crews kept reporting busy
+# from their last hook record while their panes held a bare shell). Child
+# processes, CPU, process sleep state, marker mtimes, and the old global
+# UI-regex OR are not state signals here; state/<id>.turn-ended files remain
+# wake NOTIFICATIONS owned by the watcher, not current-state truth.
 #
 # Record file: state/<id>.busy-state - exactly one line, atomically replaced
 # by bin/fm-busy-event.sh (the only writer):
@@ -40,7 +45,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   endpoint-gone, agent-gone, herdr-native, grok-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -55,6 +60,12 @@
 #      temporary regex fallback classifies a grok task from its rendered tail,
 #      then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   6. a busy verdict from any of the above, over an endpoint whose backend
+#      PROVES no agent is in it -> dead agent-gone (fm_busy_agent_absent)
+# Step 6 is deliberately last and deliberately narrow. It only ever contradicts
+# busy, so a settled record still answers for a pane whose agent exited after
+# finishing its turn, and a backend that cannot answer with confidence can
+# never downgrade a healthy worker.
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
@@ -833,13 +844,11 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
-# fm_busy_classify: semantic classification for a task whose endpoint the
-# caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
-fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+# fm_busy_classify_semantic: the purely semantic half of fm_busy_classify.
+# Prints "<verdict> <source>" from records and per-adapter semantic sources
+# only, and never probes process state. Callers want fm_busy_classify, which
+# applies the agent-absence override to this result.
+fm_busy_classify_semantic() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
   case "$harness" in
@@ -943,9 +952,56 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   printf 'unknown missing'
 }
 
-# fm_busy_classify_live: fm_busy_classify behind the one process-level
-# override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
-# be sourced for fm_backend_target_exists.
+# fm_busy_agent_absent: 0 ONLY when the recorded endpoint's backend can prove,
+# at recovery grade, that no harness agent is in it. The verdict comes from the
+# one owner of that question, fm_backend_agent_state (bin/fm-backend.sh), and
+# only its two positive absence verdicts count: `dead` (the endpoint exists and
+# confidently holds no agent) and `missing` (the endpoint is authoritatively
+# absent). `alive`, `ambiguous`, `unreadable`, and `unverified` all return 1, as
+# does a caller that has not sourced fm-backend.sh at all, so a backend that
+# cannot answer - or answers with any uncertainty - never contradicts a busy
+# verdict. Reusing that classifier rather than adding a second one is deliberate:
+# its `dead` and `missing` verdicts already license far higher-stakes actions
+# (relaunching a secondmate, refusing a lifecycle command), so consuming them to
+# correct a state READ cannot be less safe than their existing authorized use.
+fm_busy_agent_absent() {  # <backend> <target>
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 1
+  command -v fm_backend_agent_state >/dev/null 2>&1 || return 1
+  case "$(fm_backend_agent_state "$1" "$2" 2>/dev/null)" in
+    dead|missing) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_busy_classify: semantic classification for a task whose endpoint the
+# caller has already established as present, under the one process-level
+# override the contract allows. Prints "<verdict> <source>":
+# busy|idle|unknown|dead plus the producing source (see header). <tail40> is
+# optional pre-captured plain output used only by the Grok arm; when absent the
+# Grok arm captures through fm_backend_capture if available, else reports
+# unknown capture-failed.
+#
+# The override answers the one question no semantic source can: a hook, plugin,
+# or extension cannot report the end of a turn its own process did not survive,
+# so a killed agent's last record says busy forever. An absent agent therefore
+# outranks a busy record. The backend is probed ONLY when the semantic verdict
+# is busy, which keeps the cost off every idle poll and makes a downgrade the
+# only outcome the probe can produce.
+fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
+  local verdict
+  verdict=$(fm_busy_classify_semantic "$@")
+  if [ "${verdict%% *}" = busy ] && fm_busy_agent_absent "${1:-}" "${2:-}"; then
+    printf 'dead agent-gone'
+    return 0
+  fi
+  printf '%s' "$verdict"
+}
+
+# fm_busy_classify_live: fm_busy_classify plus the cheap endpoint-presence
+# override - a gone endpoint is dead, never busy - for callers that have not
+# established presence themselves. The agent-absence override inside
+# fm_busy_classify applies here too. Requires fm-backend.sh to be sourced for
+# fm_backend_target_exists.
 fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
   if [ -z "$target" ]; then

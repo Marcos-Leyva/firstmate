@@ -156,7 +156,8 @@ Codex and standalone Kimi classify unknown behind explicit probes until a semant
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
-Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Agent death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
+Both a gone endpoint and an endpoint a backend can prove holds no agent outrank a busy record, because no lifecycle hook survives a killed process and the record it never cleared would otherwise report a corpse as working; a backend that cannot answer with confidence never contradicts a verdict.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.

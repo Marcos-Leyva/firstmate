@@ -222,6 +222,62 @@ wait_for_state "$SESSION:idle" dead \
   || fail "an idle shell pane must classify dead"
 pass "tmux liveness: an idle shell pane classifies dead"
 
+# --- the state read a killed agent must not survive -------------------------
+# The 2026-09-01 incident: three OOM-killed crews kept reporting `working -
+# harness busy` for over an hour, because their lifecycle hooks could not fire
+# after the kill and the state read trusted the last record they wrote. This
+# case wires the real bin/fm-crew-state.sh to the two REAL panes above - one
+# running a harness-named process, one holding a bare shell - with an identical,
+# genuinely armed busy record on each, so the only difference between them is
+# whether an agent is actually there.
+
+CREW_STATE_LAB="$LAB/crewstate"
+mkdir -p "$CREW_STATE_LAB/state" "$CREW_STATE_LAB/wt"
+
+arm_busy_record() {  # <id>
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$CREW_STATE_LAB/state" "$1") \
+    || fail "could not arm the busy contract for $1"
+  "$ROOT/bin/fm-busy-event.sh" apply "$CREW_STATE_LAB/state" "$1" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit \
+    || fail "could not write the busy record for $1"
+}
+
+crew_state_of() {  # <id> <window>
+  {
+    printf 'window=%s\n' "$SESSION:$2"
+    printf 'worktree=%s\n' "$CREW_STATE_LAB/wt"
+    printf 'kind=scout\n'
+    printf 'harness=claude\n'
+  } > "$CREW_STATE_LAB/state/$1.meta"
+  printf 'working: implementing the fix\n' > "$CREW_STATE_LAB/state/$1.status"
+  arm_busy_record "$1"
+  FM_STATE_OVERRIDE="$CREW_STATE_LAB/state" "$ROOT/bin/fm-crew-state.sh" "$1"
+}
+
+live_read=$(crew_state_of live-crew agent)
+case "$live_read" in
+  *"state: working"*) ;;
+  *) fail "a crew with a live agent and a busy record must still read working, got: $live_read" ;;
+esac
+
+killed_read=$(crew_state_of killed-crew idle)
+case "$killed_read" in
+  *"state: working"*)
+    fail "a crew whose agent is gone must never read working from its stale busy record, got: $killed_read"
+    ;;
+esac
+case "$killed_read" in
+  *"state: unknown"*) ;;
+  *) fail "a crew whose agent is gone must read unknown, got: $killed_read" ;;
+esac
+case "$killed_read" in
+  *"implementing the fix"*)
+    fail "the killed crew's own last working: line must not become its current state, got: $killed_read"
+    ;;
+esac
+pass "tmux liveness: a stale busy record over a real agent-free pane no longer reads working"
+
 # --- a harness-named BACKGROUND process must not fake an agent --------------
 # Scoping to the foreground process group is what prevents this false alive; a
 # descendant walk of the pane would report this pane as running an agent.

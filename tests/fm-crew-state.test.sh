@@ -85,7 +85,27 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    # Format-aware, because the agent-liveness classifier in bin/backends/tmux.sh
+    # reads three different pane fields. pane_tty is deliberately empty so the
+    # foreground-process-group half of the probe reports nothing and the verdict
+    # rests on the pane's current command alone: a hermetic fake cannot own a
+    # real pty, and the real process-group behavior is covered with real
+    # processes in tests/fm-tmux-agent-liveness.test.sh.
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}" ;;
+      *pane_tty*) printf '%s\n' "${FM_FAKE_TMUX_TTY:-}" ;;
+      *) printf '%%1\n' ;;
+    esac ;;
+  list-windows)
+    # The classifier requires the exact recorded window to appear in a
+    # successful session inventory, because tmux answers an absent target from
+    # the client's active window instead of failing. Serve every window this
+    # case recorded in its own metadata, which is what a real server would list.
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    for meta in "${FM_STATE_OVERRIDE:-/nonexistent}"/*.meta; do
+      [ -f "$meta" ] || continue
+      sed -n 's/^window=[^:]*://p' "$meta"
+    done ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -106,6 +126,13 @@ case "${1:-}" in
     exit 0 ;;
   pane)
     case "${2:-}" in
+      get)
+        # Real herdr exits 1 for a business-logic "not found"; the classifier
+        # reads only the JSON body, so both shapes are served faithfully.
+        [ "${FM_FAKE_HERDR_PANE_MISSING:-0}" = 1 ] \
+          && { printf '{"error":{"code":"pane_not_found"}}\n'; exit 1; }
+        printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+        exit 0 ;;
       read)
         [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
         if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
@@ -115,6 +142,10 @@ case "${1:-}" in
   agent)
     case "${2:-}" in
       get)
+        # A pane that structurally exists with nothing registered in it: the
+        # shape a killed agent leaves behind.
+        [ "${FM_FAKE_HERDR_AGENT_MISSING:-0}" = 1 ] \
+          && { printf '{"error":{"code":"agent_not_found"}}\n'; exit 1; }
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
         printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
         exit 0 ;;
@@ -166,12 +197,20 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  # The pane's foreground command, i.e. what the agent-liveness classifier reads
+  # to decide whether an agent is actually in the endpoint. `claude` is the
+  # healthy default; `bash` models the pane an OOM-killed agent leaves behind.
+  FM_FAKE_TMUX_COMMAND=claude
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_AGENT_MISSING=0
+  FM_FAKE_HERDR_PANE_MISSING=0
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_AGENT_MISSING FM_FAKE_HERDR_PANE_MISSING
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -803,6 +842,140 @@ test_no_run_busy_pane() {
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
   pass "no run + a busy semantic record reads working, attributed to its source"
+}
+
+# Regression (2026-09-01 OOM incident): three kiro crews were killed outright,
+# every pane survived holding a bare shell, and all three kept reading
+# `working - harness busy` for over an hour, because no lifecycle hook can fire
+# after its own process is killed and nothing checked whether an agent was still
+# in the endpoint. The absence of an agent must outrank the busy record.
+test_no_run_busy_record_over_agent_free_pane_is_not_working() {
+  reset_fakes
+  local d; d=$(new_case busy-record-no-agent)
+  make_repo_on_branch "$d/wt" fm/feat-killed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-killed.meta" "window=fm:fm-feat-killed" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  # The pane exists and still paints the dead agent's last screen, but its
+  # foreground process is a bare shell.
+  FM_FAKE_TMUX_COMMAND=bash
+  # The crew's own last append, exactly as a killed worker leaves it.
+  printf 'working: implementing the fix\n' > "$d/state/feat-killed.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-killed)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-killed busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-killed)
+  assert_not_contains "$out" "state: working" "an agent-free pane must never read working"
+  assert_contains "$out" "state: unknown" "a contradicted busy record reads unknown"
+  assert_contains "$out" "agent-gone" "the verdict names the override that produced it"
+  assert_not_contains "$out" "implementing the fix" \
+    "the killed crew's own last working: line must not become the current state"
+  pass "a busy record over a pane holding no agent reads unknown, not working"
+}
+
+# The safety property in the other direction, and the one that would be worse to
+# get wrong: a backend that cannot attribute the endpoint's process must never
+# turn a healthy worker into a corpse. `node` is a real foreground process that
+# the liveness classifier deliberately refuses to call either an agent or an
+# agent-free shell.
+test_no_run_busy_record_over_unattributable_pane_stays_working() {
+  reset_fakes
+  local d; d=$(new_case busy-record-ambiguous)
+  make_repo_on_branch "$d/wt" fm/feat-ambig
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ambig.meta" "window=fm:fm-feat-ambig" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_TMUX_COMMAND=node
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-ambig)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-ambig busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-ambig)
+  assert_contains "$out" "state: working" \
+    "an unattributable endpoint must not downgrade a healthy worker"
+  assert_contains "$out" "claude-hook" "the working verdict still names its semantic source"
+  pass "an endpoint the backend cannot attribute never downgrades a busy verdict"
+}
+
+# The override only ever contradicts busy. A crew that finished its turn, wrote
+# its own settled record, and exited leaves the same bare-shell pane behind - and
+# its status log is still the right answer there.
+test_no_run_idle_record_over_agent_free_pane_still_uses_log() {
+  reset_fakes
+  local d; d=$(new_case idle-record-no-agent)
+  make_repo_on_branch "$d/wt" fm/feat-exited
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-exited.meta" "window=fm:fm-feat-exited" "worktree=$d/wt" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  FM_FAKE_TMUX_COMMAND=bash
+  printf 'done: report written\n' > "$d/state/feat-exited.status"
+  arm_idle_record "$d/state" feat-exited
+  local out; out=$(run_crew_state "$d" feat-exited)
+  assert_contains "$out" "state: done" "a settled record over an exited agent still reads its log"
+  assert_contains "$out" "source: status-log" "the override must not swallow the status-log fallback"
+  pass "a settled record over an agent-free pane still falls through to the status log"
+}
+
+# kind=secondmate deliberately skips the busy check entirely, because an idle
+# secondmate endpoint is healthy. That must stay true whether or not an agent is
+# in the pane, so the override cannot start reporting a quiet second mate as gone.
+test_no_run_secondmate_agent_free_pane_unchanged() {
+  reset_fakes
+  local d; d=$(new_case secondmate-no-agent)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate-quiet.meta" "window=fm:fm-mate-quiet" "worktree=$d/wt" \
+    "kind=secondmate" "home=$d/wt" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  FM_FAKE_TMUX_COMMAND=bash
+  printf 'working: reconciling routed items\n' > "$d/state/mate-quiet.status"
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate-quiet)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate-quiet busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" mate-quiet)
+  assert_contains "$out" "state: working" "a secondmate still reads its routed status log"
+  assert_contains "$out" "source: status-log" "the secondmate busy-check skip is preserved"
+  assert_not_contains "$out" "agent-gone" "the override must not reach the secondmate path"
+  pass "a secondmate's state read is unchanged by the agent-presence override"
+}
+
+# The same correction on the backend that reports agent presence natively: a
+# herdr pane that structurally exists with nothing registered in it is exactly
+# what a killed agent (or a restored session layout) leaves behind.
+test_no_run_herdr_busy_record_over_agentless_pane_is_not_working() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr agent-absence case skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-no-agent)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-killed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-killed.meta" "window=default:w1:p9" "worktree=$d/wt" \
+    "kind=ship" "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_MISSING=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-herdr-killed)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-killed busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-herdr-killed)
+  assert_not_contains "$out" "state: working" "a herdr pane with no registered agent is not working"
+  assert_contains "$out" "agent-gone" "the herdr verdict names the override too"
+  # Control: the same pane with a registered agent is unchanged.
+  FM_FAKE_HERDR_AGENT_MISSING=0
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  out=$(run_crew_state "$d" feat-herdr-killed)
+  assert_contains "$out" "state: working" "a registered agent keeps the busy record authoritative"
+  pass "a herdr endpoint with no registered agent stops reporting its stale busy record"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -1573,6 +1746,11 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_busy_record_over_agent_free_pane_is_not_working
+test_no_run_busy_record_over_unattributable_pane_stays_working
+test_no_run_idle_record_over_agent_free_pane_still_uses_log
+test_no_run_secondmate_agent_free_pane_unchanged
+test_no_run_herdr_busy_record_over_agentless_pane_is_not_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

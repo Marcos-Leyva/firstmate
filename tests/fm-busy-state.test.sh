@@ -6,9 +6,11 @@
 # explicit source attribution; missing, malformed, stale (gen-mismatch), and
 # untrusted (source-mismatch) semantic data classify unknown - never idle;
 # adapter isolation (one adapter's writer or Grok's regex can never classify
-# another adapter); endpoint death is the only process-level override and
-# yields dead, never busy; converted adapters never classify from rendered
-# footer text. All hermetic over temp dirs; no real agent session is invoked.
+# another adapter); agent death is the only process-level override and yields
+# dead, never busy, covering both a gone endpoint and an endpoint proven to hold
+# no agent, while no uncertain agent verdict may downgrade anything; converted
+# adapters never classify from rendered footer text. All hermetic over temp dirs;
+# no real agent session is invoked.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -393,6 +395,52 @@ test_dead_endpoint_overrides() {
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
+# The second half of that override, and the reason it exists: no lifecycle hook,
+# plugin, or extension can report the end of a turn its own process did not
+# survive, so a killed agent's last record says busy forever. Only the two
+# positive absence verdicts of the recovery-grade agent-state contract may
+# contradict it; every uncertain verdict, and a caller that never sourced the
+# backend layer at all, must leave the semantic answer alone.
+test_absent_agent_overrides_busy_record_only() {
+  local state gen out verdict
+  state=$(new_state_dir agent-gone)
+  gen=$("$EV" arm "$state" t1)
+  # No backend layer sourced at all: the override cannot fire, and must not
+  # turn the busy record into a corpse on its way out.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "with no backend layer available the record must stand, got '$out'"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf '%s' "$FAKE_AGENT_STATE"; }
+  for verdict in dead missing; do
+    FAKE_AGENT_STATE=$verdict
+    out=$(fm_busy_classify tmux w1 claude t1 "$state")
+    [ "$out" = "dead agent-gone" ] \
+      || fail "a proven-absent agent ($verdict) must outrank the busy record, got '$out'"
+  done
+  for verdict in alive ambiguous unreadable unverified surprise ''; do
+    FAKE_AGENT_STATE=$verdict
+    out=$(fm_busy_classify tmux w1 claude t1 "$state")
+    [ "$out" = "busy fm-spawn" ] \
+      || fail "agent state '$verdict' must never downgrade a busy record, got '$out'"
+  done
+  # A settled record is not contradicted: an agent that exited after finishing
+  # its turn leaves the same agent-free endpoint, and idle is still the truth.
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop \
+    || fail "apply idle failed"
+  FAKE_AGENT_STATE=dead
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] \
+    || fail "the override must only ever contradict busy, got '$out'"
+  # An empty target is never probed either.
+  FAKE_AGENT_STATE=dead
+  fm_busy_agent_absent tmux '' && fail "an empty target must not report a proven-absent agent"
+  fm_busy_agent_absent '' w1 && fail "an empty backend must not report a proven-absent agent"
+  unset -f fm_backend_agent_state
+  unset FAKE_AGENT_STATE
+  pass "a proven-absent agent overrides a busy record, and no uncertain verdict ever does"
+}
+
 test_herdr_native_busy_only() {
   local state out
   state=$(new_state_dir herdr-native)
@@ -477,6 +525,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_kiro_hook_source_trusted
 test_dead_endpoint_overrides
+test_absent_agent_overrides_busy_record_only
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown

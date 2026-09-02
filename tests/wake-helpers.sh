@@ -175,7 +175,16 @@ case "${1:-}" in
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
   list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    # Real tmux prints exactly what the format asks for: bare window names for
+    # `-F '#{window_name}'` (what the agent-liveness classifier's window
+    # membership check reads) and session:window for the `-a` inventory. The two
+    # must not be conflated, or a present window reads as an absent one.
+    if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
+      case "$*" in
+        *'#{session_name}'*) printf '%s\n' "$FM_FAKE_TMUX_WINDOW" ;;
+        *) printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}" ;;
+      esac
+    fi
     exit 0 ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the

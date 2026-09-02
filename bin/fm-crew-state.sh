@@ -41,8 +41,11 @@
 #      agree, and are reported as parked.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      when its verb maps to a recognized run-state. A busy verdict over an
+#      endpoint the backend PROVES holds no agent is reported as unknown, never
+#      working: no hook survives kill -9, so a killed crew's last record says
+#      busy forever (bin/fm-busy-lib.sh owns that override). Decision-only
+#      events such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -595,11 +598,16 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # state is not meaningful for them; read their state from the status log only.
 # Only an exact busy verdict reports working here, and only an exact idle
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# unverified semantic state remains unknown. A `dead` verdict means the busy
+# record was contradicted by the endpoint itself - the agent is not there - so it
+# reports unknown and deliberately does NOT fall through to the status log,
+# whose last line is typically the `working:` note the agent appended before it
+# died.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    dead) emit unknown pane "endpoint holds no agent (${BUSY_VERDICT#* })" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
