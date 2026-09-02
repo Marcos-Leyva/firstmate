@@ -974,6 +974,25 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Kiro CLI agent engine
+
+Kiro crewmate and scout launches select the V3 (KAS) agent engine, because an interrupt under the V2 engine orphans the shell child process tree and an orphan holding the tool's output pipe wedges the worker.
+Verified 2026-09-02 against the installed `kiro-cli` 2.18.0 (KAS 0.38.7) on macOS arm64.
+The engine is a vendor flag surface with two spellings for one choice (`--agent-engine v3` and the `--v3` alias), so the guard below reads the engine out of a REAL `bin/fm-spawn.sh` launch - with a faked tmux, so no kiro session starts and no credits are spent - and validates it against the installed binary's own advertised values.
+
+```sh
+FM_KIRO_ENGINE_LIVE=1 bin/fm-test-run.sh tests/fm-kiro-engine-flag-live-e2e.test.sh
+```
+
+```text
+ok - kiro kiro-cli 2.18.0 accepts the --agent-engine v3 the spawn launches
+FM_TEST_END 2026-09-02T17:26:58Z tests/fm-kiro-engine-flag-live-e2e.test.sh exit=0 duration_ms=5998 gate_skip=false
+```
+
+`kiro-cli chat --help` at 2.18.0 advertises `--agent-engine <ENGINE>` with `[possible values: v2, v1, v3]` and documents `v2` as its default, so an unflagged launch would still run V2.
+This guard is the refresh command after a Kiro CLI upgrade; rerun it and update the version above rather than trusting this record across releases.
+The engine's interrupt, kill, hook, marker, and process-shape evidence lives in the adapter reference at [`../../.agents/skills/harness-adapters/references/harness/kiro.md`](../../.agents/skills/harness-adapters/references/harness/kiro.md), including the two gaps V3 does not close.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its persistent second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage`, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
