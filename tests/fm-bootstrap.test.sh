@@ -1128,6 +1128,10 @@ unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
+kiro model profile is accepted^{"rules":[{"when":"kiro work","use":{"harness":"kiro","model":"claude-sonnet-4.5"}}]}^empty^
+kiro default profile is accepted^{"default":{"harness":"kiro"}}^empty^
+kiro shared efforts are accepted^{"rules":[{"when":"kiro low","use":{"harness":"kiro","effort":"low"}},{"when":"kiro medium","use":{"harness":"kiro","effort":"medium"}},{"when":"kiro high","use":{"harness":"kiro","effort":"high"}},{"when":"kiro xhigh","use":{"harness":"kiro","effort":"xhigh"}},{"when":"kiro max","use":{"harness":"kiro","effort":"max"}}]}^empty^
+unsupported kiro ultra effort is flagged^{"rules":[{"when":"kiro ultra","use":{"harness":"kiro","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kiro:ultra
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
