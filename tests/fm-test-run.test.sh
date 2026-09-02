@@ -402,9 +402,7 @@ SH
   git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
   printf '\n' >>"$timeout_repo/$timeout_script"
   set +e
-  # shellcheck disable=SC2016
-  FM_TEST_PER_SCRIPT_TIMEOUT_SECS=2 \
-    timeout 30 bash -c 'cd "$1" && bin/fm-test-run.sh --changed --base HEAD' _ "$timeout_repo" \
+  (cd "$timeout_repo" && FM_TEST_PER_SCRIPT_TIMEOUT_SECS=2 bin/fm-test-run.sh --changed --base HEAD) \
     >"$tmp/timeout.out" 2>"$tmp/timeout.err"
   rc=$?
   set -e
@@ -908,12 +906,13 @@ test_orphan_process_cannot_block_runner() {
 #!/usr/bin/env bash
 echo "ok - orphan fixture starting"
 sh -c 'echo \$\$ >"$orphan_pid_file"; sleep 600' &
+sleep 0.2
 echo "ok - parent exiting, orphan left behind"
 SH
   chmod +x "$runner" "$repo/$fixture"
 
   set +e
-  timeout 30 "$runner" --per-script-timeout-secs 10 "$fixture" \
+  "$runner" --per-script-timeout-secs 10 "$fixture" \
     >"$tmp/out" 2>"$tmp/err"
   rc=$?
   set -e
@@ -1232,6 +1231,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_orphan_process_cannot_block_runner
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout

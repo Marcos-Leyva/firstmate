@@ -2024,7 +2024,6 @@ run_script_bounded() {  # <script> <out> <stream> <id>
 
   wait "$test_pgid" 2>/dev/null
   rc=$?
-  set -e
 
   if [ "$watchdog_pid" -ne 0 ]; then
     kill "$watchdog_pid" 2>/dev/null || true
