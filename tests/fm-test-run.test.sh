@@ -346,7 +346,6 @@ test_changed_uses_bounded_automatic_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed-consent.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   for script in fm-backend-herdr-smoke.test.sh fm-daemon.test.sh fm-pi-watch-extension.test.sh; do
     cat >"$repo/tests/$script" <<'SH'
 #!/usr/bin/env bash
@@ -392,16 +391,10 @@ PY
   timeout_script=tests/fm-calm-pi-extension.test.sh
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
-  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
-fm_run_timed() {
-  [ "$1" -eq 900 ] || return 99
-  return 124
-}
-SH
   cat >"$timeout_repo/$timeout_script" <<'SH'
 #!/usr/bin/env bash
-touch should-not-run
-echo "not ok - automatic timeout helper was bypassed"
+echo "ok - fixture is about to hang"
+sleep 600
 SH
   chmod +x "$timeout_repo/bin/fm-test-run.sh" "$timeout_repo/$timeout_script"
   git -C "$timeout_repo" init -q
@@ -409,14 +402,15 @@ SH
   git -C "$timeout_repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
   printf '\n' >>"$timeout_repo/$timeout_script"
   set +e
-  (cd "$timeout_repo" && bin/fm-test-run.sh --changed --base HEAD) \
+  (cd "$timeout_repo" && FM_TEST_PER_SCRIPT_TIMEOUT_SECS=2 bin/fm-test-run.sh --changed --base HEAD) \
     >"$tmp/timeout.out" 2>"$tmp/timeout.err"
   rc=$?
   set -e
   [ "$rc" -eq 1 ] || fail "single-script automatic timeout must fail the run, got $rc"
   grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
     || fail "single unproven changed script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
-  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the single changed script"
+  grep -Fq 'exceeded the per-script bound' "$tmp/timeout.out" \
+    || fail "timeout termination message missing: $(cat "$tmp/timeout.out")"
 
   rm -rf "$tmp"
   pass "changed defaults to bounded automatic scheduling with serial override"
@@ -846,7 +840,6 @@ test_per_script_timeout_bounds_a_hang() {
   hang=tests/fm-hang-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
 #!/usr/bin/env bash
@@ -895,6 +888,54 @@ SH
 
   rm -rf "$tmp"
   pass "--per-script-timeout-secs turns a hung script into a bounded failure"
+}
+
+# The pipe-hang defect: a test that exits zero but leaves a background process
+# holding the runner's output pipe FD open blocks tee indefinitely. Process
+# group isolation must reap those orphans so the runner finishes.
+test_orphan_process_cannot_block_runner() {
+  local tmp repo runner fixture rc orphan_pid_file orphan waited
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-orphan.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-orphan-fixture.test.sh
+  orphan_pid_file="$tmp/orphan.pid"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<SH
+#!/usr/bin/env bash
+echo "ok - orphan fixture starting"
+sh -c 'echo \$\$ >"$orphan_pid_file"; sleep 600' &
+sleep 0.2
+echo "ok - parent exiting, orphan left behind"
+SH
+  chmod +x "$runner" "$repo/$fixture"
+
+  set +e
+  "$runner" --per-script-timeout-secs 10 "$fixture" \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "a green test with an orphan must still pass: rc=$rc, $(cat "$tmp/out")"
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || fail "orphan test summary is wrong: $(cat "$tmp/out")"
+  grep -Fq 'orphan fixture starting' "$tmp/out" \
+    || fail "test output was not replayed: $(cat "$tmp/out")"
+  [ -s "$orphan_pid_file" ] || fail "orphan fixture did not record its child PID"
+  orphan=$(cat "$orphan_pid_file")
+  waited=0
+  while kill -0 "$orphan" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$orphan" 2>/dev/null; then
+    kill -KILL "$orphan" 2>/dev/null || true
+    fail "orphan process $orphan survived process group cleanup"
+  fi
+
+  rm -rf "$tmp"
+  pass "process group isolation reaps orphans so the runner cannot hang"
 }
 
 # The duration regression this guard exists for: a suite whose scripts are all
@@ -1190,6 +1231,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_orphan_process_cannot_block_runner
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout

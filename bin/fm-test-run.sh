@@ -58,13 +58,20 @@
 #                   unproven remainder runs serially after that group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
-#                   after the run and so cannot catch a hang on its own.
-#                   External interruption cleanup is outside this runner's
-#                   guarantee; configured per-script bounds remain authoritative.
+#                   record it as exit 124 (0 disables). Default: 900s when
+#                   not explicitly set; override with env
+#                   FM_TEST_PER_SCRIPT_TIMEOUT_SECS (e.g. =0 to disable).
+#                   No real script approaches 900s, so the default only
+#                   converts a HUNG script into a bounded failure.
+#                   --max-wall-ms is checked after the run and so cannot
+#                   catch a hang on its own. External interruption cleanup
+#                   is outside this runner's guarantee.
+#
+#   Process isolation: each test runs in a new process group with output
+#   captured to a file. This prevents leaked background processes from
+#   holding the runner's output pipe open. After the test exits, the
+#   runner kills the process group so orphaned descendants cannot outlive
+#   the suite.
 #   --max-wall-ms N fail the run when its measured invocation wall clock exceeds
 #                   N milliseconds, including an empty selection. It is
 #                   evaluated after selection and suite execution and cannot
@@ -140,16 +147,14 @@ JOBS_EXPLICIT=0
 JOBS_MAX=8
 MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
-# Bound applied automatically on the automatic --changed path, derived from
-# measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
-# failure instead of an unbounded suite, which is the shape that silently
-# outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+PER_SCRIPT_TIMEOUT_EXPLICIT=0
+# Default per-script timeout applied when none is explicitly set. Derived
+# from measured healthy runtimes with margin: the slowest measured behavior
+# test is the 341s Herdr presentation E2E, so 900s leaves roughly 2.6x
+# headroom. A test that outruns this bound is genuinely stuck, and the runner
+# converts it to a bounded failure (exit 124) rather than hanging
+# indefinitely. Override via env: FM_TEST_PER_SCRIPT_TIMEOUT_SECS=0
+DEFAULT_TIMEOUT_SECS=${FM_TEST_PER_SCRIPT_TIMEOUT_SECS:-900}
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -1548,10 +1553,12 @@ while [ "$#" -gt 0 ]; do
     --per-script-timeout-secs)
       [ "$#" -gt 1 ] || die "--per-script-timeout-secs requires a whole number of seconds"
       PER_SCRIPT_TIMEOUT_SECS=$2
+      PER_SCRIPT_TIMEOUT_EXPLICIT=1
       shift 2
       ;;
     --per-script-timeout-secs=*)
       PER_SCRIPT_TIMEOUT_SECS=${1#--per-script-timeout-secs=}
+      PER_SCRIPT_TIMEOUT_EXPLICIT=1
       shift
       ;;
     --list)
@@ -1786,13 +1793,17 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
+# Apply the default per-script timeout unless explicitly overridden.
+# Every mode gets a bound: a hung script becomes a bounded failure (exit 124)
+# rather than an unbounded suite that silently outruns its caller's budget.
+if [ "$PER_SCRIPT_TIMEOUT_EXPLICIT" -eq 0 ] && [ "${#SCRIPTS[@]}" -gt 0 ]; then
+  PER_SCRIPT_TIMEOUT_SECS=$DEFAULT_TIMEOUT_SECS
+fi
+
 # Plain --changed uses the bounded representative-suite scheduler; numeric
 # --jobs retains the strict all-script admission rule below.
 AUTO_CONCURRENCY=0
 if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
-    PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
-  fi
   auto_admissible=0
   for s in "${SCRIPTS[@]}"; do
     script_allows_concurrency "$s" && auto_admissible=$((auto_admissible + 1))
@@ -1852,12 +1863,6 @@ if [ "$JOBS" -gt 1 ]; then
     CONCURRENT_SCRIPTS+=("$s")
   done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 "$SCHEDULE_TMP")
   rm -f "$SCHEDULE_TMP"
-fi
-
-if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || die "per-script timeout helper not found: bin/fm-timeout-lib.sh"
-  # shellcheck source=bin/fm-timeout-lib.sh
-  . "$ROOT/bin/fm-timeout-lib.sh"
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
@@ -1947,39 +1952,101 @@ record_script_result() {
   TOTAL=$((TOTAL + 1))
 }
 
-# Run <script>, capturing output to <out>. <stream> 1 also echoes it live.
+# Start <command ...> in a new process group so the whole tree can be reaped.
+_fm_start_in_pgroup() {
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'use POSIX "setpgid"; setpgid 0,0; exec @ARGV or die "exec: $!"' -- "$@" &
+  else
+    # shellcheck disable=SC3044
+    local _m=0; case $- in *m*) _m=1 ;; esac
+    set -m 2>/dev/null || true
+    "$@" &
+    [ "$_m" -eq 1 ] || set +m 2>/dev/null || true
+  fi
+  _FM_PGROUP_PID=$!
+}
+
+# TERM then KILL the process group rooted at <pgid>. Warn on survivors.
+_fm_cleanup_pgroup() {
+  local pgid=$1 i=0
+  kill -TERM -- -"$pgid" 2>/dev/null || true
+  while [ "$i" -lt 4 ]; do
+    kill -0 -- -"$pgid" 2>/dev/null || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  kill -KILL -- -"$pgid" 2>/dev/null || true
+  sleep 0.05
+  if kill -0 -- -"$pgid" 2>/dev/null; then
+    log "WARNING: orphan processes survived cleanup in group $pgid"
+  fi
+}
+
+# Run <script>, capturing output to <out>. <stream> 1 replays it after exit.
 # <id> only has to be unique within this run. When PER_SCRIPT_TIMEOUT_SECS is
 # positive, a script that outruns it is terminated and reported as exit 124: a
 # hung script must become a bounded failure rather than an unbounded suite,
 # because an unbounded suite is what silently outruns its caller's budget.
+#
+# Process isolation: the test runs in its own process group with output written
+# to a file, never through a pipe. Orphaned children cannot hold a pipe FD open
+# and block the runner. After the test exits (or times out), the entire process
+# group is reaped.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc
+  local rc timed_out=0 watchdog_pid=0 timeout_marker
   : "$id"
+  timeout_marker="$out.timeout"
+  rm -f "$timeout_marker"
   set +e
-  if [ "$stream" -eq 1 ]; then
-    if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-      # Expansion is intentionally deferred to the child bash passed to -c.
-      # shellcheck disable=SC2016
-      fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
-      rc=$?
-    else
-      bash "$script" 2>&1 | tee "$out"
-      rc=${PIPESTATUS[0]}
-    fi
-  elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
-    rc=$?
-  else
-    bash "$script" >"$out" 2>&1
-    rc=$?
+
+  # Expansion is intentionally deferred to the child bash passed to -c.
+  # shellcheck disable=SC2016
+  _fm_start_in_pgroup bash -c 'exec bash "$1" >"$2" 2>&1' _ "$script" "$out"
+  local test_pgid=$_FM_PGROUP_PID
+
+  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
+    (
+      trap - EXIT HUP INT TERM
+      elapsed=0
+      while [ "$elapsed" -lt "$PER_SCRIPT_TIMEOUT_SECS" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+        kill -0 "$test_pgid" 2>/dev/null || exit 0
+      done
+      touch "$timeout_marker"
+      kill -TERM -- -"$test_pgid" 2>/dev/null || true
+      sleep 0.2
+      kill -KILL -- -"$test_pgid" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
   fi
-  if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
+
+  wait "$test_pgid" 2>/dev/null
+  rc=$?
+
+  if [ "$watchdog_pid" -ne 0 ]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
+
+  if [ -f "$timeout_marker" ]; then
+    timed_out=1
+    rc=124
+    rm -f "$timeout_marker"
+  fi
+
+  _fm_cleanup_pgroup "$test_pgid"
+
+  if [ "$timed_out" -eq 1 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
-    [ "$stream" -eq 1 ] && tail -1 "$out"
   fi
+
+  if [ "$stream" -eq 1 ] && [ -s "$out" ]; then
+    cat "$out"
+  fi
+
   return "$rc"
 }
 
