@@ -65,11 +65,14 @@ make_brief_with_mode() {
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
-{TASK}
+## Captain's intent
+Exercise the kiro agent config behavior under test.
+
+## Firstmate spec
+Brief text for $id
 
 # Definition of done
 Delivery contract: mode=$mode
-Brief text for $id
 EOF
 }
 
@@ -235,7 +238,7 @@ test_reworded_brief_preserves_contract() {
     "brief lost the ask-user escalation rule"
   assert_grep "NEVER pass \`--yes\`" "$brief" \
     "brief lost the --yes ban"
-  assert_grep "make \`--intent\` preserve all relevant content" "$brief" \
+  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\` subsection" "$brief" \
     "brief lost the --intent contract"
   assert_grep "done: PR {url} checks green" "$brief" \
     "brief lost the CI-green return point"
