@@ -1105,6 +1105,10 @@ test_crew_dispatch_validation() {
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
+    # These rows pin the dispatch SCHEMA verdict only. kiro rows must not also
+    # trip the separate conditional kiro-cli presence check, so the binary is
+    # present here; its own absent/present cases live in the dedicated test below.
+    fm_fake_exit0 "$fakebin" kiro-cli
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
@@ -1152,6 +1156,68 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# kiro-cli is a crewmate/scout-only adapter and is deliberately absent from
+# COMMON_TOOLS, so its detection is conditional on this home actually selecting
+# kiro. These cases pin all three arms of that condition, because the failure
+# this replaces was silent at startup and only surfaced at the first spawn.
+test_kiro_cli_is_reported_only_when_this_home_selects_kiro() {
+  local case_dir fakebin out expect
+  expect="MISSING_MANUAL: kiro-cli (instructions: docs/fork-setup.md)"
+
+  # kiro selected via config/crew-harness, binary present: silent.
+  case_dir="$TMP_ROOT/kiro-harness-present"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' kiro > "$case_dir/home/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_fake_exit0 "$fakebin" kiro-cli
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "kiro selected with kiro-cli present should be silent, got: $out"
+
+  # kiro selected via config/crew-harness, binary absent: reported through the
+  # manual-install path, never as a brew-style install command.
+  case_dir="$TMP_ROOT/kiro-harness-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' kiro > "$case_dir/home/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "$expect" "a kiro crew harness with kiro-cli absent was not reported"
+  assert_not_contains "$out" "MISSING: kiro-cli (install:" \
+    "kiro-cli must not advertise manual guidance as an executable install command"
+
+  # kiro selected only inside config/crew-dispatch.json, binary absent: reported.
+  case_dir="$TMP_ROOT/kiro-dispatch-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' '{"rules":[{"when":"scout work","use":{"harness":"kiro","effort":"xhigh"}}],"default":{"harness":"codex"}}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "$expect" "a kiro dispatch rule with kiro-cli absent was not reported"
+
+  # kiro named nowhere, binary absent: silent. This is upstream's own shape and
+  # every home that never dispatches to kiro; nagging it would be the regression.
+  case_dir="$TMP_ROOT/kiro-unselected-absent"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' '{"rules":[{"when":"trivial edit","use":{"harness":"claude","model":"haiku","effort":"low"}}],"default":{"harness":"codex"}}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "kiro-cli" "a home that never selects kiro was told to install kiro-cli"
+
+  pass "bootstrap reports missing kiro-cli only when crew-harness or crew-dispatch selects kiro"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1180,3 +1246,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_kiro_cli_is_reported_only_when_this_home_selects_kiro

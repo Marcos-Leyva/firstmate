@@ -56,6 +56,9 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
+**Running this fork?** It adds Kiro CLI as a worker engine and a few local configuration files that do not ship with the clone.
+Read [docs/fork-setup.md](docs/fork-setup.md) once after cloning; it covers installing Kiro CLI, its crewmate-and-scout-only boundary, routing work to it, and the fork traps to expect.
+
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.
@@ -201,6 +204,8 @@ Firstmate's skills live in two separate places with different audiences:
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
+- [docs/fork-setup.md](docs/fork-setup.md) - what this fork adds over upstream and the one-time setup procedure after cloning (Kiro CLI install, dispatch profiles, fork traps).
+- [docs/flujo-de-trabajo.md](docs/flujo-de-trabajo.md) - the firstmate workflow explainer for the engineering team, in Spanish: what it is, how you talk to it, the full workflow, tools, and known limits.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.

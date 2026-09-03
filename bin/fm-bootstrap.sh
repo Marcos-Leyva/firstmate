@@ -870,6 +870,7 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
+    kiro-cli) echo "docs/fork-setup.md" ;;
     *) return 1 ;;
   esac
 }
@@ -1435,6 +1436,28 @@ detect_local_tools() {
   fi
 }
 
+# kiro is a crewmate/scout-only adapter, so `kiro-cli` is deliberately NOT in
+# COMMON_TOOLS: a home that never dispatches to kiro must not be told to install
+# a binary it will never launch. It is reported only when this home actually
+# selects kiro - through config/crew-harness, or through any config/crew-dispatch.json
+# rule or default profile - which is exactly where the first spawn would otherwise
+# fail with "kiro-cli executable not found on PATH".
+crew_selects_kiro() {  # <config/crew-harness value>
+  local crew=$1 file="$CONFIG/crew-dispatch.json"
+  [ "$crew" = kiro ] && return 0
+  [ -f "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '
+    def profiles($value):
+      if ($value | type) == "array" then $value
+      elif ($value | type) == "object" then [$value]
+      else []
+      end;
+    [(.rules? // [])[]? | profiles(.use?)[]?] + profiles(.default?)
+    | any(.harness? == "kiro")
+  ' "$file" >/dev/null 2>&1
+}
+
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -1460,6 +1483,9 @@ detect_local_config() {
   # instead of failing at the first spawn.
   if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
+  fi
+  if crew_selects_kiro "$crew" && ! command -v kiro-cli >/dev/null 2>&1; then
+    echo "MISSING_MANUAL: kiro-cli (instructions: $(manual_install_url kiro-cli))"
   fi
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
