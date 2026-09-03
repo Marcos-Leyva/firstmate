@@ -56,6 +56,9 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
+**Running this fork?** It adds Kiro CLI as a worker engine and a few local configuration files that do not ship with the clone.
+Read [docs/fork-setup.md](docs/fork-setup.md) once after cloning; it covers installing Kiro CLI, its crewmate-and-scout-only boundary, routing work to it, and the fork traps to expect.
+
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.

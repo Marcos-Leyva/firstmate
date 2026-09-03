@@ -317,6 +317,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/crew-dispatch-kiro.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -343,6 +347,14 @@
     {
       "path": "docs/fm-test-portable-shards.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/flujo-de-trabajo.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/fork-setup.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/gitlab-merge-watch.md",
