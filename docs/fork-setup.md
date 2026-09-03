@@ -26,9 +26,14 @@ If Kiro CLI is your daily driver, you still cannot launch firstmate itself in it
 Kiro CLI is not a `brew install`.
 It ships as a macOS application bundle with a CLI entry point inside it.
 
-1. Download and install the Kiro CLI application.
-   TODO(captain): confirmar la URL oficial de descarga.
-   Neither this repository nor `kiro-cli` itself publishes that URL, so it is deliberately left unfilled rather than guessed.
+1. Install Kiro CLI with the vendor's own installer:
+
+   ```sh
+   curl -fsSL https://cli.kiro.dev/install | bash
+   ```
+
+   **Do not confuse it with Kiro Crew.** The same vendor publishes `curl -fsSL https://download.crew.kiro.dev/cli.sh | sh`, which installs a different product; a teammate who copies that command gets something firstmate does not use.
+   The installer you want identifies itself as "Kiro CLI Installation Script" and installs the two binaries the adapter reference documents, `kiro-cli` and `kiro-cli-chat`.
 2. Confirm the CLI is on your `PATH`:
 
    ```sh
@@ -36,8 +41,10 @@ It ships as a macOS application bundle with a CLI entry point inside it.
    kiro-cli --version
    ```
 
-   On a working install the binary resolves to `~/.local/bin/kiro-cli`, a symlink into `~/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli`.
-   Firstmate resolves the executable with `command -v kiro-cli`, so a bundle you never linked onto `PATH` does not count as installed.
+   This step, not the install path, is what decides whether firstmate can launch kiro: it resolves the executable with `command -v kiro-cli`, so an application bundle you never linked onto `PATH` does not count as installed.
+   The final location varies by machine.
+   The installer targets `/Applications`, while a per-user install lands in `~/Applications` instead, with `~/.local/bin/kiro-cli` symlinked into `~/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli`.
+   On a Mac without administrator rights the system-wide path can fail outright, so expect the per-user layout there.
    The verified version at the time of writing is 2.18.0.
 3. Authenticate:
 
